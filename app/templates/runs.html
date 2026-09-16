@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}历史任务 · SQL Pulse{% endblock %}
+{% block nav_runs %}class="active"{% endblock %}
+{% block content %}
+<h1>历史任务</h1>
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr><th>创建时间</th><th>名称</th><th>run_id</th><th>状态</th><th>并发</th><th>时长</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td>{{ r.created_at or '-' }}</td>
+        <td>{{ r.name }}</td>
+        <td><code>{{ r.id }}</code></td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.concurrency }}</td>
+        <td>{{ r.duration_sec }}s</td>
+        <td class="ops">
+          <a href="/runs/{{ r.id }}/monitor">监控</a>
+          {% if r.status in ('finished', 'failed', 'cancelled') %}
+            <a href="/runs/{{ r.id }}/report">报告</a>
+          {% endif %}
+          {% if r.has_report %}
+            <a href="/api/runs/{{ r.id }}/report/download">下载</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">暂无任务，去 <a href="/runs/new">新建压测</a></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<script>setTimeout(() => location.reload(), 5000);</script>
+{% endblock %}

@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block title %}监控 · {{ run.name }} · SQL Pulse{% endblock %}
+{% block content %}
+<h1>实时监控 <small class="muted">{{ run.name }}</small></h1>
+
+<div class="status-bar card">
+  <span>run_id：<code>{{ run.id }}</code></span>
+  <span>状态：<span id="run-status" class="badge badge-{{ run.status }}">{{ run.status }}</span></span>
+  <span>并发：{{ run.concurrency }}</span>
+  <span>计划时长：{{ run.duration_sec }}s</span>
+  <span>已运行：<span id="elapsed">-</span></span>
+  <button id="btn-stop" class="danger">停止</button>
+  <a id="link-report" href="/runs/{{ run.id }}/report" class="primary" style="display:none">查看报告</a>
+</div>
+
+<details class="card" open>
+  <summary>SQL 任务解析（{{ tasks|length }} 个任务 · 图表/报告中的 sql_id 对应如下）</summary>
+  <table class="table">
+    <thead><tr><th>sql_id</th><th>权重</th><th>语句内容</th><th>P95（最新）</th><th>P99（最新）</th></tr></thead>
+    <tbody>
+    {% for t in tasks %}
+      <tr>
+        <td><code>{{ t.sql_id }}</code></td>
+        <td>{{ t.weight }}</td>
+        <td class="sql-cell">{{ t.statements|join('; ') }}</td>
+        <td id="ps-{{ t.sql_id }}-p95" class="muted">-</td>
+        <td id="ps-{{ t.sql_id }}-p99" class="muted">-</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <details><summary>原始 SQL（{{ run.sql_source }}）</summary><pre class="sql-view">{{ run.sql_content }}</pre></details>
+</details>
+
+<h2 class="section-title">压测指标</h2>
+<div class="chart-stack">
+  <div class="card chart-card">
+    <div class="chart-head"><h3>压测 QPS 与错误率</h3></div>
+    <div class="chart-body"><canvas id="chart-qps"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>响应延迟（汇总）</h3></div>
+    <div class="chart-body"><canvas id="chart-latency"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head">
+      <h3>分语句响应延迟</h3>
+      <div class="seg">
+        <button type="button" class="seg-btn" data-metric="p95">P95</button>
+        <button type="button" class="seg-btn active" data-metric="p99">P99</button>
+      </div>
+    </div>
+    <div class="chart-body"><canvas id="chart-persql"></canvas></div>
+  </div>
+</div>
+
+<h2 class="section-title">MySQL 引擎指标</h2>
+<div class="chart-stack">
+  <div class="card chart-card">
+    <div class="chart-head"><h3>连接数</h3></div>
+    <div class="chart-body"><canvas id="chart-conn"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>引擎状态（QPS / 慢查询 / 行锁等待 / 磁盘临时表）</h3></div>
+    <div class="chart-body"><canvas id="chart-engine"></canvas></div>
+  </div>
+</div>
+
+<script>
+const runId = '{{ run.id }}';
+const startedAt = Date.now();
+const maxPoints = 600;
+const charts = {};
+
+function mkChart(id, datasets, opts) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {labels: [], datasets: datasets.map(d => ({pointRadius: 0, borderWidth: 1.5, tension: 0.2, ...d, data: []}))},
+    options: Object.assign({
+      animation: false, responsive: true, maintainAspectRatio: false,
+      scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true}}},
+      plugins: {legend: {labels: {boxWidth: 12}}}
+    }, opts || {})
+  });
+}
+
+charts.qps = mkChart('chart-qps', [
+  {label: 'QPS（次/秒）', borderColor: '#2563eb', yAxisID: 'y'},
+  {label: '错误率（%）', borderColor: '#dc2626', yAxisID: 'y1', borderDash: [4, 3]}
+], {
+  scales: {
+    x: {ticks: {maxTicksLimit: 10}},
+    y: {beginAtZero: true, position: 'left', title: {display: true, text: 'QPS（次/秒）'},
+        ticks: {callback: v => v.toLocaleString()}},
+    y1: {beginAtZero: true, position: 'right', max: 1, grid: {drawOnChartArea: false},
+         title: {display: true, text: '错误率（%）'}, ticks: {callback: v => (v * 100).toFixed(0) + '%'}}
+  },
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ctx.dataset.label === '错误率（%）'
+      ? ` 错误率：${(ctx.parsed.y * 100).toFixed(2)}%`
+      : ` QPS：${ctx.parsed.y.toFixed(1)} 次/秒`
+  }}}
+});
+
+charts.latency = mkChart('chart-latency', [
+  {label: 'avg', borderColor: '#0891b2'},
+  {label: 'P95', borderColor: '#d97706'},
+  {label: 'P99', borderColor: '#dc2626'}
+], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: '延迟（ms）'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` ${ctx.dataset.label}：${ctx.parsed.y.toFixed(1)} ms`
+  }}}
+});
+
+charts.persql = mkChart('chart-persql', [], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: '延迟（ms）'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` ${ctx.dataset.label}：${ctx.parsed.y === null ? '无数据' : ctx.parsed.y.toFixed(1) + ' ms'}`
+  }}}
+});
+
+charts.conn = mkChart('chart-conn', [
+  {label: 'Threads_running', borderColor: '#7c3aed'},
+  {label: 'Threads_connected', borderColor: '#059669'}
+], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, precision: 0, title: {display: true, text: '连接数（个）'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` ${ctx.dataset.label}：${ctx.parsed.y} 个`
+  }}}
+});
+
+charts.engine = mkChart('chart-engine', [
+  {label: 'MySQL QPS（次/秒）', borderColor: '#0d9488', yAxisID: 'y'},
+  {label: '慢查询（次/秒）', borderColor: '#dc2626', yAxisID: 'y1'},
+  {label: '行锁等待（次/秒）', borderColor: '#d97706', yAxisID: 'y1', borderDash: [4, 3]},
+  {label: '磁盘临时表（次/秒）', borderColor: '#9333ea', yAxisID: 'y1', borderDash: [2, 2]}
+], {
+  scales: {
+    x: {ticks: {maxTicksLimit: 10}},
+    y: {beginAtZero: true, position: 'left', title: {display: true, text: 'MySQL QPS（次/秒）'}},
+    y1: {beginAtZero: true, position: 'right', precision: 0, grid: {drawOnChartArea: false},
+         title: {display: true, text: '事件次数（次/秒）'}}
+  },
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ctx.dataset.label === 'MySQL QPS（次/秒）'
+      ? ` MySQL QPS：${ctx.parsed.y.toFixed(1)} 次/秒`
+      : ` ${ctx.dataset.label.replace(/（次\/秒）/, '')}：${ctx.parsed.y} 次/秒`
+  }}}
+});
+
+function push(chart, ts, values) {
+  const label = new Date(ts * 1000).toLocaleTimeString('zh-CN', {hour12: false});
+  chart.data.labels.push(label);
+  chart.data.datasets.forEach((d, i) => d.data.push(values[i]));
+  if (chart.data.labels.length > maxPoints) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(d => d.data.shift());
+  }
+  chart.update('none');
+}
+
+function onPoint(p) {
+  push(charts.qps, p.ts, [p.qps, p.err_rate]);
+  push(charts.latency, p.ts, [p.avg_ms, p.p95_ms, p.p99_ms]);
+  push(charts.conn, p.ts, [p.threads_running, p.threads_connected]);
+  push(charts.engine, p.ts, [p.mysql_qps, p.slow_inc, p.lock_waits_inc, p.tmp_disk_inc]);
+}
+
+const es = new EventSource('/api/runs/' + runId + '/stream');
+es.onmessage = (e) => { onPoint(JSON.parse(e.data)); };
+es.addEventListener('end', () => { es.close(); finishPoll(); });
+
+/* ---------- 分语句 P95/P99（读 locust full-history CSV） ---------- */
+const SQL_COLORS = ['#2563eb', '#d97706', '#059669', '#9333ea', '#dc2626', '#0891b2', '#7c3aed', '#0d9488'];
+let perSqlCache = null;
+let perSqlMetric = 'p99';
+
+function renderPerSql() {
+  if (!perSqlCache) return;
+  const names = Object.keys(perSqlCache).sort();
+  const tsList = [...new Set(names.flatMap(n => perSqlCache[n].map(p => p.ts)))].sort((a, b) => a - b);
+  charts.persql.data.labels = tsList.map(ts => new Date(ts * 1000).toLocaleTimeString('zh-CN', {hour12: false}));
+  charts.persql.data.datasets = names.map((n, i) => {
+    const m = new Map(perSqlCache[n].map(p => [p.ts, p[perSqlMetric + '_ms']]));
+    return {
+      label: n, borderColor: SQL_COLORS[i % SQL_COLORS.length],
+      data: tsList.map(ts => m.has(ts) ? m.get(ts) : null),
+      spanGaps: true, pointRadius: 0, borderWidth: 1.5, tension: 0.2,
+    };
+  });
+  charts.persql.update('none');
+}
+
+function updateTaskTable() {
+  if (!perSqlCache) return;
+  Object.entries(perSqlCache).forEach(([n, series]) => {
+    ['p95', 'p99'].forEach(k => {
+      const cell = document.getElementById(`ps-${n}-${k}`);
+      if (!cell) return;
+      let last = null;
+      for (let i = series.length - 1; i >= 0; i--) {
+        if (series[i][k + '_ms'] != null) { last = series[i][k + '_ms']; break; }
+      }
+      cell.textContent = last === null ? '-' : last.toFixed(1) + ' ms';
+    });
+  });
+}
+
+async function fetchPerSql() {
+  try {
+    const resp = await fetch('/api/runs/' + runId + '/per-sql-metrics');
+    perSqlCache = await resp.json();
+    renderPerSql();
+    updateTaskTable();
+  } catch (e) { /* 运行结束前的短暂窗口，忽略 */ }
+}
+fetchPerSql();
+let perSqlTimer = setInterval(fetchPerSql, 3000);
+
+document.querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.seg-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  perSqlMetric = b.dataset.metric;
+  renderPerSql();
+}));
+
+/* ---------- 计时 / 状态 ---------- */
+let timer = setInterval(updateElapsed, 1000);
+function updateElapsed() {
+  document.getElementById('elapsed').textContent = Math.round((Date.now() - startedAt) / 1000) + 's';
+}
+updateElapsed();
+
+async function finishPoll() {
+  clearInterval(timer);
+  clearInterval(perSqlTimer);
+  await fetchPerSql(); // 结束后补最后一帧
+  const resp = await fetch('/api/runs/' + runId);
+  const run = await resp.json();
+  const badge = document.getElementById('run-status');
+  badge.textContent = run.status;
+  badge.className = 'badge badge-' + run.status;
+  document.getElementById('btn-stop').style.display = 'none';
+  document.getElementById('link-report').style.display = '';
+}
+
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  await fetch('/api/runs/' + runId + '/stop', {method: 'POST'});
+});
+
+// 轮询兜底：SSE 断开或直接进入已结束任务时刷新状态
+setInterval(async () => {
+  const resp = await fetch('/api/runs/' + runId);
+  const run = await resp.json();
+  if (run.status !== 'running') {
+    const badge = document.getElementById('run-status');
+    badge.textContent = run.status;
+    badge.className = 'badge badge-' + run.status;
+    document.getElementById('btn-stop').style.display = 'none';
+    document.getElementById('link-report').style.display = '';
+    clearInterval(perSqlTimer);
+  }
+}, 3000);
+</script>
+{% endblock %}

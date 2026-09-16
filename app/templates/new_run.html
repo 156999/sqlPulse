@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block title %}新建压测 · SQL Pulse{% endblock %}
+{% block nav_new %}class="active"{% endblock %}
+{% block content %}
+<h1>新建压测</h1>
+<form id="run-form" class="card">
+  <div class="form-row">
+    <label>任务名</label>
+    <input type="text" id="f-name" required maxlength="100" placeholder="例如：订单查询基线">
+  </div>
+
+  <fieldset>
+    <legend>目标数据库</legend>
+    <div class="grid5">
+      <div><label>Host</label><input type="text" id="f-host" value="{{ default_dsn.host }}"></div>
+      <div><label>Port</label><input type="number" id="f-port" value="{{ default_dsn.port }}"></div>
+      <div><label>User</label><input type="text" id="f-user" value="{{ default_dsn.user }}"></div>
+      <div><label>Password</label><input type="password" id="f-password" value="{{ default_dsn.password }}"></div>
+      <div><label>Database</label><input type="text" id="f-database" value="{{ default_dsn.database }}"></div>
+    </div>
+    <button type="button" id="btn-test-db" class="secondary">测试连接</button>
+    <span id="db-test-result" class="hint"></span>
+  </fieldset>
+
+  <fieldset>
+    <legend>SQL 任务（权重决定执行比例；参数占位符：整数 <code>{{ '{{rand(1,10000)}}' }}</code>、字符串 <code>{{ "{{pick('a','b','c')}}" }}</code>，客户端每次执行前随机替换）</legend>
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="form">表单模式</button>
+      <button type="button" class="tab" data-tab="paste">文本模式</button>
+      <button type="button" class="tab" data-tab="file">上传文件</button>
+      <button type="button" id="btn-example" class="tab" style="margin-left:auto">载入示例</button>
+    </div>
+    <div id="tab-form">
+      <div id="task-list"></div>
+      <button type="button" id="btn-add-task" class="secondary">+ 添加 SQL 任务</button>
+    </div>
+    <div id="tab-paste" style="display:none">
+      <textarea id="f-sql" rows="10" placeholder="-- weight: 70&#10;SELECT * FROM orders WHERE id = {{ '{{rand(1,10000)}}' }};&#10;&#10;-- weight: 30&#10;BEGIN;&#10;UPDATE stock SET qty = qty - 1 WHERE sku = 'SKU1';&#10;COMMIT;"></textarea>
+    </div>
+    <div id="tab-file" style="display:none">
+      <input type="file" id="f-sql-file" accept=".sql,.txt">
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>压测参数</legend>
+    <div class="grid3">
+      <div><label>并发数（1-500）</label><input type="number" id="f-concurrency" value="10" min="1" max="500"></div>
+      <div><label>Ramp-up（用户/秒）</label><input type="number" id="f-spawn-rate" value="5" min="1" max="500"></div>
+      <div><label>时长（秒，5-3600）</label><input type="number" id="f-duration" value="30" min="5" max="3600"></div>
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" id="btn-submit" class="primary">开始压测</button>
+    <span id="submit-result" class="hint"></span>
+  </div>
+</form>
+
+<script>
+const LS_KEY = 'sqlpulse.last_form';
+function $(sel) { return document.querySelector(sel); }
+function dsn() {
+  return {host: $('#f-host').value, port: +$('#f-port').value, user: $('#f-user').value,
+          password: $('#f-password').value, database: $('#f-database').value};
+}
+
+/* ---------- 表单模式：任务卡片 ---------- */
+function taskCard(t) {
+  const div = document.createElement('div');
+  div.className = 'task-card';
+  div.innerHTML = `
+    <div class="task-head">
+      <span class="t-badge"></span>
+      <label>权重 <input type="number" class="t-weight" value="${t.weight}" min="1" style="width:70px"></label>
+      <label>类型
+        <select class="t-type">
+          <option value="sql"${t.type !== 'txn' ? ' selected' : ''}>普通 SQL（autocommit）</option>
+          <option value="txn"${t.type === 'txn' ? ' selected' : ''}>事务 SQL（自动 BEGIN/COMMIT）</option>
+        </select>
+      </label>
+      <button type="button" class="t-del danger">删除</button>
+    </div>
+    <textarea class="t-sql" rows="4" placeholder="WHERE id = {{ '{{rand(1,10000)}}' }} 或 WHERE sku = {{ "{{pick('SKU1','SKU2')}}" }}"></textarea>`;
+  div.querySelector('.t-del').addEventListener('click', () => { div.remove(); refreshBadges(); saveForm(); });
+  div.querySelector('.t-weight').addEventListener('change', () => { refreshBadges(); saveForm(); });
+  div.querySelector('.t-sql').addEventListener('change', saveForm);
+  return div;
+}
+function getTasks() {
+  return [...document.querySelectorAll('.task-card')].map(c => ({
+    weight: Math.max(1, +c.querySelector('.t-weight').value || 1),
+    type: c.querySelector('.t-type').value,
+    sql: c.querySelector('.t-sql').value.trim(),
+  })).filter(t => t.sql);
+}
+function refreshBadges() {
+  const cards = [...document.querySelectorAll('.task-card')];
+  const weights = cards.map(c => Math.max(1, +c.querySelector('.t-weight').value || 1));
+  const filled = cards.map(c => !!c.querySelector('.t-sql').value.trim());
+  const total = weights.reduce((s, w, i) => s + (filled[i] ? w : 0), 0); // 只统计有内容的卡片
+  let n = 0;
+  cards.forEach((c, i) => {
+    const badge = c.querySelector('.t-badge');
+    if (!filled[i]) { badge.textContent = '未填写 · 提交时忽略'; return; }
+    n += 1; // 编号与提交时一致：只数有内容的卡片
+    const pct = total ? Math.round(weights[i] / total * 100) : 0;
+    badge.textContent = `sql_${n} · 权重${weights[i]} · 占比${pct}%`;
+  });
+}
+function setTasks(tasks) {
+  $('#task-list').innerHTML = '';
+  tasks.forEach(t => $('#task-list').appendChild(taskCard(t)));
+  refreshBadges();
+}
+function serializeTasks() {
+  return getTasks().map(t => {
+    let sql = t.sql;
+    if (t.type === 'txn' && !/^\s*(BEGIN|START TRANSACTION)/i.test(sql)) {
+      sql = 'BEGIN;\n' + sql + (sql.trim().endsWith(';') ? '' : ';') + '\nCOMMIT;';
+    }
+    return `-- weight: ${t.weight}\n${sql}`;
+  }).join('\n\n');
+}
+/* 简易反解析：weight 协议文本 -> 卡片（载入示例/历史回填用） */
+function parseToTasks(text) {
+  const tasks = [];
+  let cur = null;
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*--\s*weight:\s*(\d+)/i);
+    if (m) { cur = {weight: +m[1], sql: []}; tasks.push(cur); }
+    else if (/^\s*--/.test(line)) { continue; }        // 纯注释行：跳过，不入卡片
+    else if (line.trim() && cur) { cur.sql.push(line); } // weight 段内的 SQL 行
+    else if (line.trim()) { cur = {weight: 1, sql: [line]}; tasks.push(cur); } // 无 weight 头部 SQL
+  }
+  return tasks.map(t => {
+    const sql = t.sql.join('\n').trim();
+    const isTxn = /^\s*(BEGIN|START TRANSACTION)/i.test(sql);
+    return {weight: t.weight, type: isTxn ? 'txn' : 'sql', sql};
+  }).filter(t => t.sql);
+}
+$('#btn-add-task').addEventListener('click', () => {
+  $('#task-list').appendChild(taskCard({weight: 1, type: 'sql'}));
+  refreshBadges();
+  saveForm();
+});
+
+/* ---------- 表单记忆 ---------- */
+function saveForm() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      name: $('#f-name').value, dsn: dsn(), sql: $('#f-sql').value, tasks: getTasks(),
+      concurrency: $('#f-concurrency').value, spawn_rate: $('#f-spawn-rate').value,
+      duration: $('#f-duration').value,
+    }));
+  } catch (e) {}
+}
+function loadForm() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (!saved) { setTasks([{weight: 1, type: 'sql', sql: ''}]); return; }
+    if (saved.name) $('#f-name').value = saved.name;
+    if (saved.dsn) {
+      $('#f-host').value = saved.dsn.host ?? $('#f-host').value;
+      $('#f-port').value = saved.dsn.port ?? $('#f-port').value;
+      $('#f-user').value = saved.dsn.user ?? $('#f-user').value;
+      if (saved.dsn.password) $('#f-password').value = saved.dsn.password;
+      $('#f-database').value = saved.dsn.database ?? $('#f-database').value;
+    }
+    if (saved.sql) $('#f-sql').value = saved.sql;
+    setTasks(saved.tasks && saved.tasks.length ? saved.tasks : [{weight: 1, type: 'sql', sql: ''}]);
+    if (saved.concurrency) $('#f-concurrency').value = saved.concurrency;
+    if (saved.spawn_rate) $('#f-spawn-rate').value = saved.spawn_rate;
+    if (saved.duration) $('#f-duration').value = saved.duration;
+  } catch (e) { setTasks([{weight: 1, type: 'sql', sql: ''}]); }
+}
+loadForm();
+['f-name','f-host','f-port','f-user','f-password','f-database','f-sql','f-concurrency','f-spawn-rate','f-duration']
+  .forEach(id => $('#'+id).addEventListener('change', saveForm));
+
+/* ---------- 示例 / 连接测试 / 模式切换 ---------- */
+$('#btn-example').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/demo.sql');
+  const text = await resp.text();
+  $('#f-sql').value = text;
+  setTasks(parseToTasks(text));
+  document.querySelector('.tab[data-tab="form"]').click();
+  saveForm();
+});
+
+$('#btn-test-db').addEventListener('click', async () => {
+  const r = $('#db-test-result');
+  r.textContent = '测试中...'; r.className = 'hint';
+  const resp = await fetch('/api/db/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dsn())});
+  const data = await resp.json();
+  if (data.ok) { r.textContent = '✓ 连接成功'; r.className = 'hint ok'; }
+  else { r.textContent = '✗ ' + data.error; r.className = 'hint err'; }
+});
+
+document.querySelectorAll('.tab[data-tab]').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#tab-form').style.display = t.dataset.tab === 'form' ? '' : 'none';
+  $('#tab-paste').style.display = t.dataset.tab === 'paste' ? '' : 'none';
+  $('#tab-file').style.display = t.dataset.tab === 'file' ? '' : 'none';
+}));
+
+/* ---------- 提交 ---------- */
+$('#run-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const hint = $('#submit-result');
+  const mode = document.querySelector('.tab[data-tab].active').dataset.tab;
+  let sql_content = '';
+  if (mode === 'form') {
+    sql_content = serializeTasks();
+    if (!sql_content) { hint.textContent = '✗ 请至少填写一个 SQL 任务'; hint.className = 'hint err'; return; }
+  } else if (mode === 'paste') {
+    sql_content = $('#f-sql').value;
+  } else {
+    const fileInput = $('#f-sql-file');
+    if (!fileInput.files.length) { hint.textContent = '✗ 请选择 .sql 文件'; hint.className = 'hint err'; return; }
+    sql_content = await fileInput.files[0].text();
+  }
+  if (!sql_content.trim()) { hint.textContent = '✗ SQL 内容为空'; hint.className = 'hint err'; return; }
+  const body = {
+    name: $('#f-name').value, sql_source: mode === 'file' ? 'file' : 'paste',
+    sql_content: sql_content,
+    concurrency: +$('#f-concurrency').value, spawn_rate: +$('#f-spawn-rate').value,
+    duration_sec: +$('#f-duration').value, db_dsn: dsn(),
+  };
+  saveForm();
+  $('#btn-submit').disabled = true; hint.textContent = '提交中...'; hint.className = 'hint';
+  try {
+    const resp = await fetch('/api/runs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await resp.json();
+    if (resp.ok) { window.location.href = '/runs/' + data.run_id + '/monitor'; }
+    else { hint.textContent = '✗ ' + (data.detail || '提交失败'); hint.className = 'hint err'; $('#btn-submit').disabled = false; }
+  } catch (err) { hint.textContent = '✗ ' + err; hint.className = 'hint err'; $('#btn-submit').disabled = false; }
+});
+</script>
+{% endblock %}

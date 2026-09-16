@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}报告 · {{ run.name }} · SQL Pulse{% endblock %}
+{% block content %}
+<h1>压测报告 <small class="muted">{{ run.name }} · {{ run.id }}</small></h1>
+
+{% if not report %}
+<div class="card muted">报告尚未生成（任务仍在运行或异常终止）。</div>
+{% else %}
+{% set l0 = report.l0 %}
+<div class="card">
+  <h3>任务参数</h3>
+  <p>
+    状态：<span class="badge badge-{{ run.status }}">{{ run.status }}</span>
+    · 并发 {{ run.concurrency }}（spawn {{ run.spawn_rate }}/s）
+    · 计划 {{ run.duration_sec }}s（实际 {{ l0.actual_duration_sec or '-' }}s）
+    · {{ run.started_at or '-' }} ~ {{ run.ended_at or '-' }}
+  </p>
+  {% if run.error_msg %}<p class="err-msg">错误信息：<code>{{ run.error_msg }}</code></p>{% endif %}
+</div>
+
+<details class="card">
+  <summary>已提交的 SQL（{{ run.sql_source }}）</summary>
+  <pre class="sql-view">{{ run.sql_content }}</pre>
+</details>
+
+<div class="card">
+  <h3>L0 指标总览</h3>
+  <table class="table">
+    <tr><th>总请求数</th><td>{{ l0.total_requests }}</td><th>总失败数</th><td>{{ l0.total_failures }}</td></tr>
+    <tr><th>错误率</th><td>{% if l0.err_rate is not none %}{{ "%.2f"|format(l0.err_rate * 100) }}%{% else %}-{% endif %}</td>
+        <th>QPS 均值 / 峰值</th><td>{{ l0.qps_avg|round(1) if l0.qps_avg is not none else '-' }} / {{ l0.qps_peak|round(1) if l0.qps_peak is not none else '-' }}</td></tr>
+    <tr><th>平均延迟</th><td>{{ l0.avg_ms|round(1) if l0.avg_ms is not none else '-' }} ms</td>
+        <th>P50 / P95 / P99</th><td>{{ l0.p50_ms|round(1) if l0.p50_ms is not none else '-' }} / {{ l0.p95_ms|round(1) if l0.p95_ms is not none else '-' }} / {{ l0.p99_ms|round(1) if l0.p99_ms is not none else '-' }} ms</td></tr>
+    <tr><th>最大延迟</th><td>{{ l0.max_ms|round(1) if l0.max_ms is not none else '-' }} ms</td>
+        <th>Threads_running P95</th><td>{{ l0.threads_running_p95 if l0.threads_running_p95 is not none else '-' }}</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>分语句统计</h3>
+  <table class="table">
+    <thead><tr><th>语句</th><th>内容</th><th>请求数</th><th>失败数</th><th>平均</th><th>P95</th><th>P99</th><th>最大</th><th>QPS</th></tr></thead>
+    <tbody>
+    {% for s in l0.per_sql %}
+      <tr>
+        <td><code>{{ s.sql_id }}</code></td>
+        <td class="sql-cell" title="{{ s.sql }}">{{ s.sql|truncate(60) }}</td>
+        <td>{{ s.requests }}</td><td>{{ s.failures }}</td>
+        <td>{{ s.avg_ms|round(1) if s.avg_ms is not none else '-' }}</td>
+        <td>{{ s.p95_ms|round(1) if s.p95_ms is not none else '-' }}</td>
+        <td>{{ s.p99_ms|round(1) if s.p99_ms is not none else '-' }}</td>
+        <td>{{ s.max_ms|round(1) if s.max_ms is not none else '-' }}</td>
+        <td>{{ s.qps|round(1) if s.qps is not none else '-' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="muted">无数据</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>L1 规则建议 <span class="tag">本地规则报告 · 未配置 LLM</span></h3>
+  {% if report.l1 %}
+    {% for a in report.l1 %}
+      <div class="advice advice-{{ a.level }}">
+        <strong>[{{ a.level|upper }}] {{ a.title }}</strong>
+        <p>{{ a.detail }}</p>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="muted">无命中规则，各项指标在阈值内。</p>
+  {% endif %}
+</div>
+
+<div class="form-actions">
+  <a class="primary" href="/api/runs/{{ run.id }}/report/download">下载 Markdown 报告</a>
+</div>
+{% endif %}
+{% endblock %}

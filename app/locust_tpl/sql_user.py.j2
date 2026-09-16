@@ -1,0 +1,52 @@
+import os, pymysql, time, random, re, ast
+from locust import User, task, between, events
+
+DSN = {
+  "host": os.environ["TARGET_DB_HOST"], "port": int(os.environ.get("TARGET_DB_PORT","3306")),
+  "user": os.environ["TARGET_DB_USER"], "password": os.environ["TARGET_DB_PASSWORD"],
+  "database": os.environ["TARGET_DB_NAME"], "autocommit": True,
+}
+
+_PARAM_RE = re.compile(r"\{\{\s*rand\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)\s*\}\}")
+_PICK_RE = re.compile(r"\{\{\s*pick\((.*?)\)\s*\}\}")
+
+def _fill(s):
+    s = _PARAM_RE.sub(lambda m: str(random.randint(int(m.group(1)), int(m.group(2)))), s)
+    def _pick(m):
+        v = random.choice(ast.literal_eval("({0},)".format(m.group(1))))
+        return repr(v) if isinstance(v, str) else str(v)  # 字符串需保留引号再注入 SQL
+    return _PICK_RE.sub(_pick, s)
+
+class SqlUser(User):
+    wait_time = between(0.01, 0.05)
+
+    def on_start(self):
+        self.db = pymysql.connect(**DSN)
+
+    def on_stop(self):
+        try:
+            self.db.close()
+        except Exception:
+            pass
+
+    def _exec(self, sql_id, statements):
+        start = time.perf_counter()
+        try:
+            with self.db.cursor() as cur:
+                for s in statements:
+                    cur.execute(_fill(s))
+            self.environment.events.request.fire(
+                request_type="SQL", name=sql_id,
+                response_time=(time.perf_counter()-start)*1000,
+                response_length=0)
+        except Exception as e:
+            self.environment.events.request.fire(
+                request_type="SQL", name=sql_id, exception=e,
+                response_time=(time.perf_counter()-start)*1000,
+                response_length=0)
+
+{% for t in tasks %}
+    @task({{ t.weight }})
+    def {{ t.sql_id }}(self):
+        self._exec("{{ t.sql_id }}", {{ t.statements | tojson }})
+{% endfor %}

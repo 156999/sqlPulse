@@ -1,6 +1,6 @@
 # SQL Pulse（MVP）
 
-SQL 压测 + 实时可视化 + L0/L1 报告的一站式本地工具：粘贴/上传 SQL → 设置并发与时长 → 实时看 QPS / P99 / 连接数曲线 → 结束自动生成指标报告与规则建议（Markdown 可下载）。
+SQL 压测 + 造数 + 实时可视化 + L0/L1 报告的一站式本地工具：粘贴/上传 SQL → 设置并发与时长 → 实时看 QPS / P99 / 连接数曲线 → 结束自动生成指标报告与规则建议（Markdown 可下载）。
 
 ## 5 分钟上手
 
@@ -39,6 +39,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 3. 提交后跳转监控页：QPS+错误率（次/秒 / %）、avg/P95/P99（ms）、Threads_running/connected（个）三张实时图（SSE，1s 粒度），并可展开查看本次提交的 SQL
 4. 停止或跑完后进报告页：L0 指标 + 分语句统计 + L1 规则建议 + 已提交 SQL，可下载 `sqlpulse_report_<run_id>.md`
 
+## 造数
+
+1. 侧边栏进入“造数”：填写任务名和目标库，测试连接后选择 SQL 或 Shell 方式
+2. SQL 支持粘贴/上传 `.sql`，也支持 `DELIMITER` 与存储过程体；执行后累计 `rows_affected`
+3. Shell 支持粘贴/上传 Bash 脚本，DSN 通过 `TARGET_DB_*` 环境变量注入；脚本写 `result.json` 可上报影响行数
+4. Shell 默认由 `DATAGEN_SCRIPT_EXECUTION_ENABLED` 开关控制（默认 `false`），任务有独立日志、停止和重启恢复
+
 ## 测试
 
 ```bash
@@ -52,9 +59,9 @@ pytest tests/integration -v     # 集成：需 app 在 :8080 运行 + MySQL 在 
 app/
   main.py            FastAPI 入口（healthz / lifespan 启动 collector）
   config.py          pydantic-settings 读 .env
-  db.py              SQLite schema（runs / metrics / reports）
-  routers/           pages / tasks / monitor(SSE) / reports
-  services/          runner(LocustRunner) / collector / report / rule_engine
+  db.py              SQLite schema（runs / metrics / reports / datagen_jobs）
+  routers/           pages / datagen / tasks / monitor(SSE) / reports
+  services/          runner(LocustRunner) / datagen / sql_executor / script_runner / collector / report / rule_engine
   locust_tpl/        sql_user.py.j2 locustfile 模板
   ai/ mcp/           Sprint 2-3 预留桩
 tests/               unit / integration / assets(good|slow|bad.sql)

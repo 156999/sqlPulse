@@ -10,7 +10,7 @@ from loguru import logger
 
 from app import db
 from app.config import settings
-from app.routers import monitor, pages, reports, tasks
+from app.routers import datagen, monitor, pages, reports, tasks
 from app.services.collector import collector
 from app.services.report import generate_report
 from app.services.runner import runner
@@ -29,8 +29,13 @@ def setup_logging() -> None:
 async def lifespan(app: FastAPI):
     db.init_schema()
     recovered = db.recover_orphans()
-    if recovered:
-        logger.warning("recovered {} orphan run(s) to failed", recovered)
+    datagen_recovered = db.recover_datagen_orphans()
+    if recovered or datagen_recovered:
+        logger.warning(
+            "recovered {} orphan run(s) and {} datagen job(s) to failed",
+            recovered,
+            datagen_recovered,
+        )
     runner.set_on_finish(lambda run_id: generate_report(run_id))
     task = asyncio.create_task(collector.run_loop())
     logger.info("SQL Pulse started, data dir: {}", settings.data_dir)
@@ -49,6 +54,7 @@ def healthz():
 
 
 app.include_router(pages.router)
+app.include_router(datagen.router)
 app.include_router(tasks.router)
 app.include_router(monitor.router)
 app.include_router(reports.router)

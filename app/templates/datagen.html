@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block title %}造数 · SQL Pulse{% endblock %}
+{% block nav_datagen %}class="active"{% endblock %}
+{% block content %}
+<h1>造数</h1>
+
+<form id="datagen-form" class="card">
+  <div class="form-row">
+    <label>任务名</label>
+    <input type="text" id="f-name" required maxlength="100" placeholder="例如：订单数据补充 1 万行">
+  </div>
+
+  <fieldset>
+    <legend>目标数据库</legend>
+    <div class="grid5">
+      <div><label>Host</label><input type="text" id="f-host" value="{{ default_dsn.host }}"></div>
+      <div><label>Port</label><input type="number" id="f-port" value="{{ default_dsn.port }}"></div>
+      <div><label>User</label><input type="text" id="f-user" value="{{ default_dsn.user }}"></div>
+      <div><label>Password</label><input type="password" id="f-password" value="{{ default_dsn.password }}"></div>
+      <div><label>Database</label><input type="text" id="f-database" value="{{ default_dsn.database }}"></div>
+    </div>
+    <button type="button" id="btn-test-db" class="secondary">测试连接</button>
+    <span id="db-test-result" class="hint"></span>
+  </fieldset>
+
+  <fieldset>
+    <legend>造数方式</legend>
+    <div class="tabs">
+      <button type="button" class="tab active" data-mode="sql">SQL</button>
+      <button type="button" class="tab" data-mode="shell">Shell</button>
+    </div>
+
+    <div id="panel-sql">
+      <textarea id="f-sql" rows="12" placeholder="INSERT INTO orders (uid, amount, status, created_at) VALUES (1, 10.5, 'new', NOW());"></textarea>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">上传 .sql 文件
+          <input type="file" id="f-sql-file" accept=".sql,.txt" hidden>
+        </label>
+        <button type="button" id="btn-example-sql" class="secondary">载入示例</button>
+      </div>
+    </div>
+
+    <div id="panel-shell" style="display:none">
+      <textarea id="f-script" rows="12" placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;# 通过 TARGET_DB_* 环境变量连接目标库"></textarea>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">上传脚本
+          <input type="file" id="f-script-file" accept=".sh,.bash,.txt" hidden>
+        </label>
+        <button type="button" id="btn-example-shell" class="secondary">载入示例</button>
+      </div>
+      <details class="advice advice-info">
+        <summary>脚本环境变量</summary>
+        <pre class="sql-view">{{ env_vars|join('\n') }}</pre>
+      </details>
+      <div id="shell-switch-hint" class="hint {% if script_enabled %}ok{% else %}err{% endif %}">
+        {% if script_enabled %}Shell 执行开关已开启{% else %}Shell 执行开关未开启，提交 Shell 任务会被拒绝{% endif %}
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" id="btn-submit" class="primary">开始造数</button>
+    <span id="submit-result" class="hint"></span>
+  </div>
+</form>
+
+<h2 class="section-title">历史任务</h2>
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr><th>创建时间</th><th>名称</th><th>方式</th><th>状态</th><th>影响行数</th><th>错误信息</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td>{{ job.created_at or '-' }}</td>
+        <td>{{ job.name }}</td>
+        <td><code>{{ job.mode }}</code></td>
+        <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+        <td>{% if job.rows_affected is not none %}{{ job.rows_affected }}{% else %}-{% endif %}</td>
+        <td class="err-cell">{{ job.error_msg or '-' }}</td>
+        <td class="ops">
+          <a href="/api/datagen/jobs/{{ job.id }}/log" target="_blank">日志</a>
+          {% if job.status == 'running' %}
+            <a href="#" class="stop-job" data-id="{{ job.id }}">停止</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">暂无造数任务</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+const LS_KEY = 'sqlpulse.datagen.form';
+const scriptEnabled = {{ 'true' if script_enabled else 'false' }};
+const maxSqlChars = {{ max_sql_chars }};
+const maxScriptChars = {{ max_script_chars }};
+
+function $id(s) { return document.getElementById(s); }
+function dsn() {
+  return {host: $id('f-host').value, port: +$id('f-port').value, user: $id('f-user').value,
+          password: $id('f-password').value, database: $id('f-database').value};
+}
+function activeMode() { return document.querySelector('.tab[data-mode].active').dataset.mode; }
+
+function saveForm() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      name: $id('f-name').value, dsn: dsn(), mode: activeMode(),
+      sql: $id('f-sql').value, script: $id('f-script').value,
+    }));
+  } catch (e) {}
+}
+function loadForm() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (!saved) return;
+    if (saved.name) $id('f-name').value = saved.name;
+    if (saved.dsn) {
+      $id('f-host').value = saved.dsn.host ?? $id('f-host').value;
+      $id('f-port').value = saved.dsn.port ?? $id('f-port').value;
+      $id('f-user').value = saved.dsn.user ?? $id('f-user').value;
+      if (saved.dsn.password) $id('f-password').value = saved.dsn.password;
+      $id('f-database').value = saved.dsn.database ?? $id('f-database').value;
+    }
+    if (saved.sql) $id('f-sql').value = saved.sql;
+    if (saved.script) $id('f-script').value = saved.script;
+    if (saved.mode === 'shell') switchMode('shell');
+  } catch (e) {}
+}
+function switchMode(mode) {
+  document.querySelectorAll('.tab[data-mode]').forEach(t => t.classList.remove('active'));
+  document.querySelector('.tab[data-mode="' + mode + '"]').classList.add('active');
+  $id('panel-sql').style.display = mode === 'sql' ? '' : 'none';
+  $id('panel-shell').style.display = mode === 'shell' ? '' : 'none';
+  saveForm();
+}
+document.querySelectorAll('.tab[data-mode]').forEach(t => t.addEventListener('click', () => switchMode(t.dataset.mode)));
+['f-name','f-host','f-port','f-user','f-password','f-database','f-sql','f-script']
+  .forEach(id => $id(id).addEventListener('change', saveForm));
+$id('f-sql').addEventListener('input', saveForm);
+$id('f-script').addEventListener('input', saveForm);
+
+async function readFile(input, target, maxChars) {
+  const file = input.files[0];
+  if (!file) return;
+  const text = await file.text();
+  if (text.length > maxChars) {
+    $id('submit-result').textContent = '✗ 文件超过 ' + maxChars + ' 字符限制';
+    $id('submit-result').className = 'hint err';
+    return;
+  }
+  $id(target).value = text;
+  saveForm();
+}
+$id('f-sql-file').addEventListener('change', e => readFile(e.target, 'f-sql', maxSqlChars));
+$id('f-script-file').addEventListener('change', e => readFile(e.target, 'f-script', maxScriptChars));
+
+$id('btn-example-sql').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/datagen.sql');
+  $id('f-sql').value = await resp.text();
+  saveForm();
+});
+$id('btn-example-shell').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/datagen_shell.sh');
+  $id('f-script').value = await resp.text();
+  saveForm();
+});
+
+$id('btn-test-db').addEventListener('click', async () => {
+  const r = $id('db-test-result');
+  r.textContent = '测试中...'; r.className = 'hint';
+  const resp = await fetch('/api/db/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dsn())});
+  const data = await resp.json();
+  if (data.ok) { r.textContent = '✓ 连接成功'; r.className = 'hint ok'; }
+  else { r.textContent = '✗ ' + data.error; r.className = 'hint err'; }
+});
+
+$id('datagen-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const hint = $id('submit-result');
+  const mode = activeMode();
+  const content = (mode === 'sql' ? $id('f-sql') : $id('f-script')).value.trim();
+  if (!content) {
+    hint.textContent = '✗ 造数内容为空'; hint.className = 'hint err'; return;
+  }
+  if (mode === 'shell' && !scriptEnabled) {
+    hint.textContent = '✗ Shell 造数开关未开启'; hint.className = 'hint err'; return;
+  }
+  if (mode === 'shell' && !confirm('Shell 脚本会在目标侧以子进程执行，确认继续？')) return;
+  const body = {
+    name: $id('f-name').value, mode: mode, source: 'paste',
+    content: content, db_dsn: dsn(),
+  };
+  saveForm();
+  $id('btn-submit').disabled = true; hint.textContent = '提交中...'; hint.className = 'hint';
+  try {
+    const resp = await fetch('/api/datagen/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await resp.json();
+    if (resp.ok) {
+      hint.textContent = '✓ 已创建造数任务 ' + data.job_id;
+      hint.className = 'hint ok';
+      setTimeout(() => location.reload(), 1200);
+    } else {
+      hint.textContent = '✗ ' + (data.detail || '提交失败'); hint.className = 'hint err';
+      $id('btn-submit').disabled = false;
+    }
+  } catch (err) {
+    hint.textContent = '✗ ' + err; hint.className = 'hint err'; $id('btn-submit').disabled = false;
+  }
+});
+
+document.querySelectorAll('.stop-job').forEach(a => a.addEventListener('click', async (e) => {
+  e.preventDefault();
+  await fetch('/api/datagen/jobs/' + a.dataset.id + '/stop', {method: 'POST'});
+  location.reload();
+}));
+
+loadForm();
+setTimeout(() => location.reload(), 5000);
+</script>
+{% endblock %}

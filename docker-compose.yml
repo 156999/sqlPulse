@@ -8,6 +8,9 @@ services:
       - TARGET_DB_USER=root
       - TARGET_DB_PASSWORD=s3cret
       - TARGET_DB_NAME=sqlpulse_demo
+      - DATAGEN_SCRIPT_EXECUTION_ENABLED=${DATAGEN_SCRIPT_EXECUTION_ENABLED:-false}
+      - DATAGEN_SQL_TIMEOUT_SEC=${DATAGEN_SQL_TIMEOUT_SEC:-300}
+      - DATAGEN_SCRIPT_TIMEOUT_SEC=${DATAGEN_SCRIPT_TIMEOUT_SEC:-3600}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

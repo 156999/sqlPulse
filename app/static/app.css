@@ -88,6 +88,9 @@ details.card summary { cursor: pointer; font-weight: 600; color: #374151; }
             word-break: break-all; max-height: 360px; overflow: auto; }
 .sql-cell { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             font-family: Consolas, monospace; font-size: 12.5px; color: #4b5563; }
+.err-cell { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            font-size: 12.5px; color: #dc2626; }
+.file-btn { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; margin: 0; }
 
 .task-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: #fafafa; }
 .task-head { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; flex-wrap: wrap; }

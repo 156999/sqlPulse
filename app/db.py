@@ -50,6 +50,20 @@ CREATE TABLE IF NOT EXISTS reports (
   md_path       TEXT NOT NULL,
   created_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS datagen_jobs (
+  id                TEXT PRIMARY KEY,
+  name              TEXT NOT NULL,
+  mode              TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  target_dsn_json   TEXT NOT NULL,
+  input_json        TEXT NOT NULL,
+  rows_affected     INTEGER,
+  log_path          TEXT,
+  error_msg         TEXT,
+  created_at        TEXT NOT NULL,
+  started_at        TEXT,
+  ended_at          TEXT
+);
 """
 
 
@@ -105,6 +119,15 @@ def recover_orphans() -> int:
         return cur.rowcount
 
 
+def recover_datagen_orphans() -> int:
+    with tx() as conn:
+        cur = conn.execute(
+            "UPDATE datagen_jobs SET status='failed', error_msg='平台重启中断', ended_at=datetime('now') "
+            "WHERE status IN ('pending','running')"
+        )
+        return cur.rowcount
+
+
 def create_run(row: dict) -> None:
     with tx() as conn:
         conn.execute(
@@ -132,6 +155,35 @@ def update_run(run_id: str, fields: dict) -> None:
     fields["id"] = run_id
     with tx() as conn:
         conn.execute(f"UPDATE runs SET {sets} WHERE id=:id", fields)
+
+
+def create_datagen_job(row: dict) -> None:
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO datagen_jobs (id,name,mode,status,target_dsn_json,input_json,created_at)"
+            " VALUES (:id,:name,:mode,:status,:target_dsn_json,:input_json,:created_at)",
+            row,
+        )
+
+
+def get_datagen_job(job_id: str) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM datagen_jobs WHERE id=?", (job_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_datagen_jobs() -> list:
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM datagen_jobs ORDER BY created_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_datagen_job(job_id: str, fields: dict) -> None:
+    sets = ", ".join(f"{k}=:{k}" for k in fields)
+    fields = dict(fields)
+    fields["id"] = job_id
+    with tx() as conn:
+        conn.execute(f"UPDATE datagen_jobs SET {sets} WHERE id=:id", fields)
 
 
 def insert_metric(m: dict) -> None:

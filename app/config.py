@@ -19,8 +19,21 @@ class Settings(BaseSettings):
     logs_dir: Path = BASE_DIR / "logs"
     reports_dir: Path = BASE_DIR / "reports"
 
+    datagen_script_execution_enabled: bool = False
+    datagen_sql_timeout_sec: int = 300
+    datagen_script_timeout_sec: int = 3600
+    datagen_max_sql_chars: int = 5_000_000
+    datagen_max_script_chars: int = 500_000
+
     def ensure_dirs(self) -> None:
-        for p in (self.data_dir, self.logs_dir, self.data_dir / "locustfiles", self.data_dir / "locust", self.logs_dir, self.reports_dir):
+        for p in (
+            self.data_dir,
+            self.logs_dir,
+            self.data_dir / "locustfiles",
+            self.data_dir / "locust",
+            self.data_dir / "datagen",
+            self.reports_dir,
+        ):
             p.mkdir(parents=True, exist_ok=True)
 
 

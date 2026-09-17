@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -53,3 +53,11 @@ class MetricPoint(BaseModel):
     err_rate: Optional[float] = None
     threads_running: Optional[int] = None
     threads_connected: Optional[int] = None
+
+
+class DataGenJobCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    mode: Literal["sql", "shell"]
+    source: Literal["paste", "file"] = "paste"
+    content: str = Field(min_length=1)
+    db_dsn: DbDsn

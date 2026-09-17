@@ -40,12 +40,35 @@ def _wait_status(client, run_id, timeout=90):
 @pytest.fixture(scope="module")
 def client():
     with httpx.Client(timeout=30) as c:
+        r = c.post(f"{BASE}/login", data={"username": "root", "password": "root"})
+        assert r.status_code == 303, r.text
         yield c
 
 
 def test_healthz(client):
     r = client.get(f"{BASE}/healthz")
     assert r.status_code == 200 and r.json() == {"status": "ok"}
+
+
+def test_auth_roundtrip(client):
+    username = f"e2e_{int(time.time())}"
+    with httpx.Client(timeout=30) as c:
+        r = c.get(f"{BASE}/runs/new")
+        assert r.status_code == 303, r.text
+        assert r.headers["location"].startswith("/login")
+
+        r = c.post(
+            f"{BASE}/register",
+            data={
+                "username": username,
+                "password": "password1",
+                "password_confirm": "password1",
+            },
+        )
+        assert r.status_code == 303, r.text
+        assert c.get(f"{BASE}/runs/new").status_code == 200
+        c.post(f"{BASE}/logout")
+        assert c.get(f"{BASE}/api/datagen/jobs").status_code == 401
 
 
 def test_db_test(client):

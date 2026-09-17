@@ -11,6 +11,17 @@ code { background: #e5e7eb; padding: 1px 5px; border-radius: 3px; font-size: 0.9
 .sidebar nav a { display: block; color: #d1d5db; padding: 10px 20px; }
 .sidebar nav a:hover, .sidebar nav a.active { background: #1f2937; color: #fff; text-decoration: none; }
 .sidebar-foot { padding: 0 20px; font-size: 12px; color: #6b7280; }
+.sidebar-foot .user-box { padding: 10px 0 12px; border-top: 1px solid #1f2937; }
+.user-name { color: #e5e7eb; font-size: 13px; font-weight: 600; word-break: break-all; }
+.logout-form { margin-top: 8px; }
+.logout-btn { background: transparent; border: 1px solid #374151; color: #93c5fd; padding: 4px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.logout-btn:hover { background: #1f2937; color: #fff; }
+.foot-line { padding-top: 8px; }
+
+.auth-panel { max-width: 420px; margin: 56px auto; }
+.auth-card h1 { margin-bottom: 16px; }
+.auth-error { margin-bottom: 10px; }
+.auth-form .form-actions { margin-top: 16px; }
 
 .content { flex: 1; padding: 24px 32px; max-width: 1200px; }
 h1 { font-size: 22px; margin-bottom: 16px; }

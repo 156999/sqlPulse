@@ -12,12 +12,29 @@
 <div class="layout">
   <aside class="sidebar">
     <div class="logo">SQL&nbsp;Pulse</div>
-    <nav>
+    {% if current_user or not auth_enabled %}
+    <nav class="business-nav">
       <a href="/runs/new" {% block nav_new %}{% endblock %}>新建压测</a>
       <a href="/datagen" {% block nav_datagen %}{% endblock %}>造数</a>
       <a href="/runs" {% block nav_runs %}{% endblock %}>历史任务</a>
     </nav>
-    <div class="sidebar-foot">MVP · SQL Boys</div>
+    {% else %}
+    <nav class="auth-nav">
+      <a href="/login" {% block nav_login %}{% endblock %}>登录</a>
+      {% if auth_allow_register %}<a href="/register" {% block nav_register %}{% endblock %}>注册</a>{% endif %}
+    </nav>
+    {% endif %}
+    <div class="sidebar-foot">
+      {% if current_user %}
+      <div class="user-box">
+        <span class="user-name">{{ current_user.username }}</span>
+        <form method="post" action="/logout" class="logout-form">
+          <button type="submit" class="logout-btn">退出</button>
+        </form>
+      </div>
+      {% endif %}
+      <div class="foot-line">MVP · SQL Boys</div>
+    </div>
   </aside>
   <main class="content">
     {% block content %}{% endblock %}

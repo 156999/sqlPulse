@@ -5,7 +5,6 @@ from uuid import uuid4
 import pymysql
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from fastapi.templating import Jinja2Templates
 from loguru import logger
 
 from app import db
@@ -14,9 +13,9 @@ from app.models import DataGenJobCreate
 from app.services.datagen import datagen_executor
 from app.services.runner import now_iso
 from app.services.script_runner import tail_file
+from app.templating import templates
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 _ENV_VARS = [
     "TARGET_DB_HOST",

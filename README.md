@@ -8,12 +8,14 @@ SQL 压测 + 造数 + 实时可视化 + L0/L1 报告的一站式本地工具：�
 
 ```bash
 cp .env.example .env   # 按需改目标库配置（compose 内置示例库，通常不用改）
+python -c "import secrets; print(secrets.token_urlsafe(32))"  # 生成 APP_SECRET_KEY 并填入 .env
 docker compose up -d --build
 ```
 
-- 打开 http://localhost:8080
+- 打开 http://localhost:8080，首次启动可直接用测试账号 `root / root` 登录
 - compose 会同时启动被测 MySQL（mysql:8.0，首次启动自动建库 `sqlpulse_demo` 并造数）
 - 宿主机已占用 3306 的情况下不冲突：compose 的 MySQL 映射到宿主机 **3307**（web 容器走内部网络访问 mysql:3306 不受影响）
+- 共享环境请修改 `root` 密码或关闭 `AUTH_SEED_ROOT`；对外部署前必须修改默认启动的 `APP_SECRET_KEY`
 - 结束后 `docker compose down`（加 `-v` 连同数据卷一起清）
 
 ### 方式二：本地 Python 运行（被测库自备或复用已起的 MySQL）
@@ -22,11 +24,19 @@ docker compose up -d --build
 # Python 3.12
 pip install -r requirements.txt
 cp .env.example .env          # TARGET_DB_* 指向你的 MySQL
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # 生成 APP_SECRET_KEY 并填入 .env
 mysql -h 127.0.0.1 -u root -p < scripts/seed_demo.sql   # 初始化示例库
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-打开 http://localhost:8080
+打开 http://localhost:8080，首次启动可用 `root / root` 登录；也可以进入“注册”创建新账号。
+
+## 认证
+
+- `AUTH_ENABLED=true`（默认）时，业务页面和 `/api/*` 均需登录；未登录页面跳转 `/login`，未登录 API 返回 `401`。
+- `AUTH_ENABLED=false` 可完全放行，仅建议在隔离的本地或演示环境使用。
+- 密码使用 Argon2 哈希，会话为 Starlette 签名 Cookie（默认 7 天），服务重启后会话仍有效。
+- 生产环境必须设置强随机 `APP_SECRET_KEY`，必要时开启 `AUTH_COOKIE_SECURE=true`。
 
 > Chart.js / HTMX 走 jsdelivr CDN。离线环境请自行下载到 `app/static/` 并修改 `app/templates/base.html` 引用。
 
@@ -59,8 +69,9 @@ pytest tests/integration -v     # 集成：需 app 在 :8080 运行 + MySQL 在 
 app/
   main.py            FastAPI 入口（healthz / lifespan 启动 collector）
   config.py          pydantic-settings 读 .env
-  db.py              SQLite schema（runs / metrics / reports / datagen_jobs）
-  routers/           pages / datagen / tasks / monitor(SSE) / reports
+  auth.py            密码哈希、当前用户、统一鉴权依赖
+  db.py              SQLite schema（runs / metrics / reports / datagen_jobs / users）
+  routers/           auth / pages / datagen / tasks / monitor(SSE) / reports
   services/          runner(LocustRunner) / datagen / sql_executor / script_runner / collector / report / rule_engine
   locust_tpl/        sql_user.py.j2 locustfile 模板
   ai/ mcp/           Sprint 2-3 预留桩

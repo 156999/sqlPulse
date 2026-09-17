@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -24,6 +25,20 @@ class Settings(BaseSettings):
     datagen_script_timeout_sec: int = 3600
     datagen_max_sql_chars: int = 5_000_000
     datagen_max_script_chars: int = 500_000
+
+    auth_enabled: bool = True
+    app_secret_key: str = ""
+    auth_session_ttl_seconds: int = 604800
+    auth_session_cookie: str = "sqlpulse_session"
+    auth_cookie_secure: bool = False
+    auth_allow_register: bool = True
+    auth_seed_root: bool = True
+
+    @model_validator(mode="after")
+    def _require_secret_key_when_auth_enabled(self):
+        if self.auth_enabled and not self.app_secret_key:
+            raise ValueError("APP_SECRET_KEY must be set when AUTH_ENABLED=true")
+        return self
 
     def ensure_dirs(self) -> None:
         for p in (

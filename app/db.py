@@ -2,7 +2,9 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Iterator, Optional
+from uuid import uuid4
 
 from app.config import settings
 
@@ -64,6 +66,12 @@ CREATE TABLE IF NOT EXISTS datagen_jobs (
   started_at        TEXT,
   ended_at          TEXT
 );
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
 """
 
 
@@ -109,6 +117,44 @@ def init_schema() -> None:
         for col, typ in _METRIC_ALTERS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+    seed_root_user()
+
+
+def get_user_by_username(username: str) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM users WHERE username=? COLLATE NOCASE",
+        (username,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user(user_id: str) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_user(username: str, password_hash: str) -> dict:
+    user_id = uuid4().hex
+    created_at = datetime.now().isoformat(timespec="seconds")
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, created_at) VALUES (?,?,?,?)",
+            (user_id, username, password_hash, created_at),
+        )
+    return {"id": user_id, "username": username, "created_at": created_at}
+
+
+def seed_root_user() -> Optional[dict]:
+    if not settings.auth_seed_root or get_user_by_username("root"):
+        return None
+    from app.auth import hash_password
+    try:
+        return create_user("root", hash_password("root"))
+    except sqlite3.IntegrityError:
+        # 多 worker 同时启动时可能同时看到 root 不存在，插入竞争由 UNIQUE 约束兜底。
+        return get_user_by_username("root")
 
 
 def recover_orphans() -> int:

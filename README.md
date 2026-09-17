@@ -2,23 +2,42 @@
 
 SQL 压测 + 造数 + 实时可视化 + L0/L1 报告的一站式本地工具：粘贴/上传 SQL → 设置并发与时长 → 实时看 QPS / P99 / 连接数曲线 → 结束自动生成指标报告与规则建议（Markdown 可下载）。
 
+> 完整服务器部署步骤见 [LINUX_DEPLOY.md](LINUX_DEPLOY.md)。
+> MySQL Docker 部署与外部连接见 [MYSQL_DEPLOY.md](MYSQL_DEPLOY.md)。
+
 ## 5 分钟上手
 
-### 方式一：docker compose 一键启动（推荐）
+### 方式一：腾讯云 Ubuntu 一键部署（推荐）
 
 ```bash
-cp .env.example .env   # 按需改目标库配置（compose 内置示例库，通常不用改）
+bash deploy.sh
+```
+
+脚本会自动安装 Docker 与 Compose 插件（若缺失）、生成 `.env` 并写入随机 `APP_SECRET_KEY`、构建并后台启动全部容器，最后等待健康检查通过。
+
+腾讯云服务器上还需要：
+
+1. 在云控制台安全组放行 `8080`（若改过 `WEB_PORT` 则放行对应端口）；示例库 MySQL 的宿主机端口 `3307` 不需要对公网放行
+2. 打开 `http://<服务器公网IP>:8080`，首次启动用测试账号 `root / root` 登录
+3. 首次启动时 compose 自动建库 `sqlpulse_demo` 并执行 [scripts/seed_demo.sql](scripts/seed_demo.sql) 造数
+4. 对外部署前请改 `.env` 中的 `MYSQL_ROOT_PASSWORD`；有 HTTPS 反向代理时设 `AUTH_COOKIE_SECURE=true`，不需要开放注册时设 `AUTH_ALLOW_REGISTER=false`
+
+数据存储在 Docker 命名卷中：容器随服务器重启自动拉起，`docker compose down` 不会丢数据，只有 `docker compose down -v` 才会清空并重新初始化。
+后续更新代码后，在项目目录重新执行 `bash deploy.sh` 即可重建并更新容器。
+
+### 方式二：本地 docker compose 启动
+
+```bash
+cp .env.example .env
 python -c "import secrets; print(secrets.token_urlsafe(32))"  # 生成 APP_SECRET_KEY 并填入 .env
 docker compose up -d --build
 ```
 
 - 打开 http://localhost:8080，首次启动可直接用测试账号 `root / root` 登录
-- compose 会同时启动被测 MySQL（mysql:8.0，首次启动自动建库 `sqlpulse_demo` 并造数）
-- 宿主机已占用 3306 的情况下不冲突：compose 的 MySQL 映射到宿主机 **3307**（web 容器走内部网络访问 mysql:3306 不受影响）
-- 共享环境请修改 `root` 密码或关闭 `AUTH_SEED_ROOT`；对外部署前必须修改默认启动的 `APP_SECRET_KEY`
-- 结束后 `docker compose down`（加 `-v` 连同数据卷一起清）
+- 宿主机已占用 3306 的情况下不冲突：compose 的 MySQL 默认映射到宿主机 **3307**（web 容器走内部网络访问 mysql:3306 不受影响）
+- 结束后 `docker compose down`；加 `-v` 会连同命名卷一起清空并重新执行 seed 脚本
 
-### 方式二：本地 Python 运行（被测库自备或复用已起的 MySQL）
+### 方式三：本地 Python 运行（被测库自备或复用已起的 MySQL）
 
 ```bash
 # Python 3.12
@@ -38,7 +57,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 - 密码使用 Argon2 哈希，会话为 Starlette 签名 Cookie（默认 7 天），服务重启后会话仍有效。
 - 生产环境必须设置强随机 `APP_SECRET_KEY`，必要时开启 `AUTH_COOKIE_SECURE=true`。
 
-> Chart.js / HTMX 走 jsdelivr CDN。离线环境请自行下载到 `app/static/` 并修改 `app/templates/base.html` 引用。
+> Chart.js / HTMX 已内置到 `app/static/vendor/`，部署不依赖公网 CDN。
 
 ## 使用流程
 
@@ -79,4 +98,4 @@ tests/               unit / integration / assets(good|slow|bad.sql)
 scripts/seed_demo.sql  示例库建库造数（orders 1w / stock 500 / access_log 5w）
 ```
 
-数据落盘：`data/`（SQLite + locustfile + locust CSV）、`logs/app.log`、`reports/<run_id>/`。
+数据落盘：本地运行在 `data/`（SQLite + locustfile + locust CSV）、`logs/app.log`、`reports/<run_id>/`；docker compose 部署时对应目录为命名卷 `sqlpulse_data` / `sqlpulse_logs` / `sqlpulse_reports`。

@@ -1,7 +1,11 @@
 FROM python:3.12-slim
 
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=120
 
 WORKDIR /app
 
@@ -9,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --timeout "${PIP_DEFAULT_TIMEOUT}" -r requirements.txt
 
 COPY app ./app
 COPY scripts ./scripts

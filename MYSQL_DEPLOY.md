@@ -186,3 +186,17 @@ docker volume inspect mysql_public_data
 - 端口冲突：服务器已有 3306 时改 `MYSQL_HOST_PORT=3307` 或 `-p 3307:3306`
 - 连接被拒绝：执行 `docker compose ps` 或 `docker ps` 确认 MySQL 已启动
 - 客户端不支持 `caching_sha2_password`：升级客户端，或对旧客户端创建 `mysql_native_password` 账号
+
+## 9. 把外部 MySQL 登记到 SQL Pulse
+
+SQL Pulse 的压测页和造数页都支持“已保存连接”，无需修改 `.env` 或重启服务即可使用外部 MySQL：
+
+1. 登录后进入侧边栏“连接管理”，点击“新建连接”。
+2. 填写外部 MySQL 的 Host、端口、用户、密码和数据库，点击“保存并测试”。
+3. 在新建压测或造数页选择“已保存连接”，从下拉框中选择刚登记的连接。
+
+说明：
+
+- 连接按登录用户隔离；`AUTH_ENABLED=false` 时归入共享匿名空间。
+- 任务创建时后端会把连接解析出的 DSN 写入任务快照，之后修改或删除连接不影响历史任务。
+- 连接列表和详情接口不返回密码；密码按 V1 设计明文保存在 SQL Pulse 本地 SQLite 中。

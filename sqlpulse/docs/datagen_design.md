@@ -505,3 +505,8 @@ SQL 校验规则：
 - LLM 生成 SQL 的质量不稳定，通过预览、编辑和校验降低风险。
 - Shell 模式的行数统计依赖用户脚本主动提供 `result.json`，不提供时保持为空。
 
+
+
+## 占位符与生成条数补充
+
+SQL 造数与压测共用 `app/services/sql_params.py` 的占位符解析、类型校验和参数绑定，支持 `rand`、`randf`、`pick`、`pickw`、`randstr`、`randdate`、`randdt`、`uuid` 及 `var`。造数页 SQL 模式增加 `row_count`（1～1,000,000），每条解析后的 SQL 重复执行指定次数；每次执行重新生成直接随机占位符，命名变量在一次 SQL 执行内复用。参数通过 PyMySQL 绑定传入，不使用字符串拼接。Shell 模式不使用该字段，由脚本自身控制循环。

@@ -152,6 +152,28 @@ docker compose down -v
 ## 8. 常见问题
 
 - 网页打不开：先确认安全组放行 `8080`，再执行 `docker compose ps`，确认 `web` 和 `mysql` 都是 `healthy`。
+- web 构建时 `pip install` 报 `files.pythonhosted.org ... Read timed out`：这是 Docker 构建阶段拉取 Python 依赖超时。确认 `.env` 中有 `PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple`，如仍超时可改为 `https://pypi.tuna.tsinghua.edu.cn/simple`，然后重新执行 `bash deploy.sh`。
+- Docker 拉取镜像报错 `docker.mirrors.ustc.edu.cn ... no such host`：这是 Docker daemon 配置了失效镜像源，不是项目配置问题。先查看当前镜像源：
+
+  ```bash
+  docker info --format '{{json .RegistryConfig.Mirrors}}'
+  sudo cat /etc/docker/daemon.json
+  ```
+
+  然后改为腾讯云镜像源并重启 Docker：
+
+  ```bash
+  sudo cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.$(date +%Y%m%d%H%M%S)
+  sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+  {
+    "registry-mirrors": ["https://mirror.ccs.tencentyun.com"]
+  }
+  EOF
+  sudo systemctl daemon-reload
+  sudo systemctl restart docker
+  ```
+
+  回到 `/opt/sqlpulse` 重新执行 `bash deploy.sh`。如果该镜像源仍不可用，可临时改用 `https://docker.m.daocloud.io`，或移除 `registry-mirrors` 后重启 Docker。
 - 端口被占用：修改 `.env` 中 `WEB_PORT` / `MYSQL_HOST_PORT`，再执行 `bash deploy.sh`。
 - 示例库没有初始化：首次初始化只执行一次；需要重新初始化时执行 `docker compose down -v && bash deploy.sh`。
 - 想要 HTTPS：用 Nginx / Caddy 反代本机 `8080`，并将 `AUTH_COOKIE_SECURE=true`。

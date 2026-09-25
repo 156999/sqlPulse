@@ -37,7 +37,7 @@
 | 报告包含“图表和表格” | 4.3 | 只有表格，Markdown 报告无图表 |
 | 每次运行的可下载报告包 | 4.5 | 落盘了 `report.md` + `metrics.json`，但下载接口只给 `.md`，没有打包，也没有图表产物 |
 | 结构化日志 | 4.2 | 是 loguru 文本日志，不是结构化（JSON）格式 |
-| 凭据通过 Web UI 录入 | 4.6 | 数据库凭据可以；LLM API Key 无录入入口 |
+| 凭据通过 Web UI 录入 | 4.6 | 数据库凭据可以（V1 新增连接管理页）；LLM API Key 无录入入口 |
 | REST API 覆盖完整生命周期 | 4.4 | 五个动作都在，但缺 `GET /api/runs` 列表查询，接口也未统一 `response_model` |
 
 ## 三、未实现
@@ -53,16 +53,16 @@
 | Web Settings 页面配置 LLM API Key | 4.3 / 4.6 | 全站无设置页 |
 | MCP Server：`start_benchmark` / `get_metrics` / `get_report` | 4.4 | `app/mcp/__init__.py` 仅占位，无 MCP SDK 依赖 |
 | MCP Server 监听 8765 端口 | 4.6 | compose 中只有 web 与 mysql 两个服务 |
-| 数据库凭据与 API Key 本地加密 | 4.6 | 密码明文写入 SQLite `runs.db_dsn_json`（`app/routers/tasks.py:56`）；`cryptography` 依赖已声明但未使用 |
+| 数据库凭据与 API Key 本地加密 | 4.6 | 密码明文写入 SQLite 任务快照与 V1 `mysql_connections` 表；统一加密存储留给 V2，`cryptography` 依赖已声明但未使用 |
 
 ## 四、超出立案书的额外能力
 
 - SQL 权重比例与事务块支持
-- `{{rand(a,b)}}` / `{{pick('a','b')}}` 参数化
+- 占位符参数化：`rand` / `randf` / `pick` / `pickw` / `randstr` / `randdate` / `randdt` / `uuid`，每个虚拟用户每次执行前替换
 - 分语句 P95/P99 独立曲线
 - 失败任务自动判定（全部请求失败标记为 `failed`）
 - 平台重启后孤儿任务恢复
-- 表单与连接信息的 localStorage 记忆
+- 表单与连接信息的 localStorage 记忆（V1 起只记忆连接选择，不再保存明文密码）
 - 缓冲池命中率采集（已入库，但未上图、未进报告）
 
 ## 五、认证 V1（2026-09-17 已实现）
@@ -74,7 +74,17 @@
 - 首次启动自动创建测试账号 `root / root`，重复启动不覆盖账号密码。
 - 注册入口可由 `AUTH_ALLOW_REGISTER` 关闭；种子账号可由 `AUTH_SEED_ROOT` 关闭。
 
-## 六、下一步优先级建议
+## 六、连接管理 V1（2026-09-18 已实现）
+
+- 新增 `mysql_connections` 表与按 `user_id` 隔离的 CRUD，`UNIQUE (user_id, name)` 约束同一用户下连接名唯一。
+- 新增 `GET /connections` 连接管理页，支持新建、编辑、删除、测试；列表与详情接口不返回 `password`。
+- 新增 `/api/connections/*`、`/api/connections/test` 接口，压测 `/api/runs` 与造数 `/api/datagen/jobs` 共用 `connection_manager.test_dsn`。
+- 压测页和造数页新增“已保存连接 / 临时连接”切换；使用已保存连接时提交 `connection_id`，后端解析后继续写入 `runs.db_dsn_json` / `datagen_jobs.target_dsn_json` 快照。
+- 任务快照保持原有 JSON 结构，历史任务不读取连接最新配置；只填 `db_dsn` 的旧请求继续可用。
+- `AUTH_ENABLED=false` 时连接归属 `anonymous` 匿名空间；重新启用鉴权后匿名连接不进入真实用户列表。
+- 编辑时密码留空表示保持原密码；浏览器 `localStorage` 不再保存明文密码。
+
+## 七、下一步优先级建议
 
 缺口集中在三块，正好对应代码里已预留的桩位：
 

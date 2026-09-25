@@ -37,6 +37,20 @@ if [[ $EUID -ne 0 ]] && ! docker info >/dev/null 2>&1; then
   RUN=(sudo)
 fi
 
+if "${RUN[@]}" docker info >/dev/null 2>&1; then
+  MIRRORS="$("${RUN[@]}" docker info --format '{{json .RegistryConfig.Mirrors}}' 2>/dev/null || true)"
+  if [[ "$MIRRORS" == *"docker.mirrors.ustc.edu.cn"* ]]; then
+    if ! getent hosts docker.mirrors.ustc.edu.cn >/dev/null 2>&1; then
+      echo "==> 检测到 Docker 镜像源 docker.mirrors.ustc.edu.cn 无法解析" >&2
+      echo "    这是 Docker daemon 配置问题，请先备份并替换 /etc/docker/daemon.json" >&2
+      echo "    改用 https://mirror.ccs.tencentyun.com 后执行:" >&2
+      echo "    sudo systemctl daemon-reload && sudo systemctl restart docker" >&2
+      echo "    详细步骤见 LINUX_DEPLOY.md 常见问题。" >&2
+      exit 1
+    fi
+  fi
+fi
+
 echo "==> [2/4] 准备 .env"
 if [[ ! -f .env ]]; then
   cp .env.example .env

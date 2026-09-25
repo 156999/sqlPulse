@@ -11,6 +11,7 @@ from app import db
 from app.config import settings
 from app.services import datagen as datagen_module
 from app.services.script_runner import build_script_env, read_result_rows, tail_file, write_script
+from app.services.sql_params import compile_statement, compile_variables
 
 
 @pytest.fixture
@@ -91,3 +92,21 @@ class TestDataGenWorker:
         job = db.get_datagen_job("job-a")
         assert job["status"] == "failed"
         assert job["error_msg"] == "bad sql"
+
+    def test_sql_job_uses_shared_placeholders_and_row_count(self, temp_db, monkeypatch):
+        self._create_job()
+        captured = {}
+        def execute(*args, **kwargs):
+            captured['statements'] = args[2]
+            captured.update(kwargs)
+            return "finished", 6, None
+        monkeypatch.setattr(datagen_module, "execute_sql_job", execute)
+        db.update_datagen_job("job-a", {"input_json": json.dumps({
+            "source": "paste", "content": "INSERT INTO t VALUES ({{rand(1,9)}}, {{var('id')}});",
+            "variables": {"id": "rand(10,20)"}, "row_count": 3,
+        })})
+        datagen_module.DataGenExecutor()._worker("job-a", threading.Event())
+        assert len(captured['statements']) == 1
+        assert hasattr(captured['statements'][0], 'bind')
+        assert captured['row_count'] == 3
+        assert set(captured['variable_definitions']) == {'id'}

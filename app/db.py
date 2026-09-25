@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS runs (
   status        TEXT NOT NULL,
   sql_source    TEXT NOT NULL,
   sql_content   TEXT NOT NULL,
+  variables_json TEXT NOT NULL DEFAULT '{}',
+  groups_json TEXT NOT NULL DEFAULT '[]',
   concurrency   INTEGER NOT NULL,
   spawn_rate    INTEGER NOT NULL,
   duration_sec  INTEGER NOT NULL,
@@ -72,6 +74,21 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   created_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mysql_connections (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  host        TEXT NOT NULL,
+  port        INTEGER NOT NULL DEFAULT 3306,
+  user        TEXT NOT NULL,
+  password    TEXT NOT NULL DEFAULT '',
+  database    TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  UNIQUE (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_mysql_connections_user
+  ON mysql_connections (user_id);
 """
 
 
@@ -113,6 +130,11 @@ _METRIC_ALTERS = {
 def init_schema() -> None:
     with tx() as conn:
         conn.executescript(SCHEMA)
+        run_columns = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        if "groups_json" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN groups_json TEXT NOT NULL DEFAULT '[]'")
+        if "variables_json" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN variables_json TEXT NOT NULL DEFAULT '{}'")
         existing = {r[1] for r in conn.execute("PRAGMA table_info(metrics)")}
         for col, typ in _METRIC_ALTERS.items():
             if col not in existing:
@@ -157,6 +179,67 @@ def seed_root_user() -> Optional[dict]:
         return get_user_by_username("root")
 
 
+def list_connections(user_id: str) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM mysql_connections WHERE user_id=? ORDER BY updated_at DESC, name ASC",
+        (user_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_connection(user_id: str, connection_id: str) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM mysql_connections WHERE id=? AND user_id=?",
+        (connection_id, user_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def create_connection(user_id: str, fields: dict) -> dict:
+    with tx() as c:
+        params = dict(fields)
+        params["user_id"] = user_id
+        c.execute(
+            "INSERT INTO mysql_connections"
+            " (id,user_id,name,host,port,user,password,database,created_at,updated_at)"
+            " VALUES (:id,:user_id,:name,:host,:port,:user,:password,:database,:created_at,:updated_at)",
+            params,
+        )
+        row = c.execute(
+            "SELECT * FROM mysql_connections WHERE id=? AND user_id=?",
+            (params["id"], user_id),
+        ).fetchone()
+    return dict(row)
+
+
+def update_connection(user_id: str, connection_id: str, fields: dict) -> Optional[dict]:
+    with tx() as c:
+        fields = {k: v for k, v in fields.items() if k != "updated_at"}
+        sets = ", ".join(f"{k}=:{k}" for k in fields)
+        params = dict(fields)
+        params["connection_id"] = connection_id
+        params["user_id"] = user_id
+        params["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        cur = c.execute(
+            f"UPDATE mysql_connections SET {sets}, updated_at=:updated_at"
+            " WHERE id=:connection_id AND user_id=:user_id",
+            params,
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_connection(user_id, connection_id)
+
+
+def delete_connection(user_id: str, connection_id: str) -> bool:
+    with tx() as c:
+        cur = c.execute(
+            "DELETE FROM mysql_connections WHERE id=? AND user_id=?",
+            (connection_id, user_id),
+        )
+        return cur.rowcount > 0
+
 def recover_orphans() -> int:
     with tx() as conn:
         cur = conn.execute(
@@ -175,10 +258,11 @@ def recover_datagen_orphans() -> int:
 
 
 def create_run(row: dict) -> None:
+    row = {"variables_json": "{}", "groups_json": "[]", **row}
     with tx() as conn:
         conn.execute(
-            "INSERT INTO runs (id,name,status,sql_source,sql_content,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
-            " VALUES (:id,:name,:status,:sql_source,:sql_content,:concurrency,:spawn_rate,:duration_sec,:db_dsn_json,:created_at)",
+            "INSERT INTO runs (id,name,status,sql_source,sql_content,variables_json,groups_json,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
+            " VALUES (:id,:name,:status,:sql_source,:sql_content,:variables_json,:groups_json,:concurrency,:spawn_rate,:duration_sec,:db_dsn_json,:created_at)",
             row,
         )
 

@@ -14,54 +14,32 @@ from loguru import logger
 
 from app import db
 from app.config import settings
+from app.services.sql_params import tokens, compile_tasks
 
 WEIGHT_RE = re.compile(r"^\s*--\s*weight:\s*(\d+)", re.IGNORECASE)
 
 
 def split_statements(text: str) -> list:
     stmts, buf = [], []
-    i, n, q = 0, len(text), None
-    while i < n:
-        c = text[i]
-        if q:
-            buf.append(c)
-            if c == "\\" and i + 1 < n and q != "`":
-                buf.append(text[i + 1])
-                i += 2
-                continue
-            if c == q:
-                q = None
-            i += 1
-            continue
-        if c in ("'", '"', "`"):
-            q = c
-            buf.append(c)
-            i += 1
-            continue
-        if c == "-" and text[i : i + 2] == "--":
-            j = text.find("\n", i)
-            if j == -1:
-                break
-            i = j
-            continue
-        if c == "#":
-            j = text.find("\n", i)
-            if j == -1:
-                break
-            i = j
-            continue
-        if c == ";":
-            s = "".join(buf).strip()
-            if s:
-                stmts.append(s)
+    has_sql = False
+    for kind, value, _ in tokens(text):
+        if kind == "comment":
+            if value.startswith("/*"):
+                # Preserve MySQL executable comments and optimizer hints.
+                buf.append(value)
+                has_sql = has_sql or value.startswith("/*!")
+            else:
+                buf.append("".join("\n" if c == "\n" else " " for c in value))
+        elif kind == "code" and value == ";":
+            if has_sql:
+                stmts.append("".join(buf).strip())
             buf = []
-            i += 1
-            continue
-        buf.append(c)
-        i += 1
-    s = "".join(buf).strip()
-    if s:
-        stmts.append(s)
+            has_sql = False
+        else:
+            buf.append(value)
+            has_sql = has_sql or bool(value.strip())
+    if has_sql:
+        stmts.append("".join(buf).strip())
     return stmts
 
 
@@ -69,14 +47,14 @@ def parse_sql_tasks(sql_text: str) -> list:
     """weight 注释段：整段一个 task（事务支持）；无注释段：事务块整体、普通语句各自成 task。"""
     segments = []
     current = {"weight": None, "lines": []}
-    for line in sql_text.splitlines():
-        m = WEIGHT_RE.match(line)
+    for kind, value, offset in tokens(sql_text):
+        line_start = sql_text.rfind("\n", 0, offset) + 1
+        m = WEIGHT_RE.match(value) if kind == "comment" and not sql_text[line_start:offset].strip() else None
         if m:
-            if any(l.strip() and not l.strip().startswith("#") for l in current["lines"]) or current["weight"] is not None:
-                segments.append(current)
+            segments.append(current)
             current = {"weight": int(m.group(1)), "lines": []}
         else:
-            current["lines"].append(line)
+            current["lines"].append(value)
     segments.append(current)
 
     def is_begin(s: str) -> bool:
@@ -84,7 +62,7 @@ def parse_sql_tasks(sql_text: str) -> list:
         return u == "BEGIN" or u == "START TRANSACTION"
 
     def is_commit(s: str) -> bool:
-        return s.upper() == "COMMIT"
+        return s.upper() in ("COMMIT", "ROLLBACK")
 
     tasks = []
 
@@ -93,7 +71,7 @@ def parse_sql_tasks(sql_text: str) -> list:
             tasks.append({"sql_id": f"sql_{len(tasks) + 1}", "weight": weight, "statements": stmts})
 
     for seg in segments:
-        stmts = split_statements("\n".join(seg["lines"]))
+        stmts = split_statements("".join(seg["lines"]))
         if not stmts:
             continue
         if seg["weight"] is not None:
@@ -117,13 +95,14 @@ def parse_sql_tasks(sql_text: str) -> list:
     return tasks
 
 
-def render_locustfile(tasks: list, out_path: Path) -> str:
+def render_locustfile(tasks: list, out_path: Path, variables=None) -> str:
+    compile_tasks(tasks, variables or {})
     env = Environment(
         loader=FileSystemLoader(str(Path(__file__).resolve().parent.parent / "locust_tpl")),
         autoescape=False,
         keep_trailing_newline=True,
     )
-    content = env.get_template("sql_user.py.j2").render(tasks=tasks)
+    content = env.get_template("sql_user.py.j2").render(tasks=tasks, variables=variables or {}, project_root=str(Path(__file__).resolve().parents[2]))
     out_path.write_text(content, encoding="utf-8")
     return content
 
@@ -154,13 +133,18 @@ class LocustRunner:
         run = db.get_run(run_id)
         if not run:
             raise KeyError(run_id)
-        tasks = parse_sql_tasks(run["sql_content"])
+        saved_groups = json.loads(run.get("groups_json") or "[]")
+        if saved_groups:
+            from app.services.run_form import group_tasks
+            tasks = group_tasks(saved_groups)[0]
+        else:
+            tasks = parse_sql_tasks(run["sql_content"])
         if not tasks:
             db.update_run(run_id, {"status": "failed", "error_msg": "没有可执行的 SQL 语句", "ended_at": now_iso()})
             raise ValueError("没有可执行的 SQL 语句")
 
         locustfile = settings.data_dir / "locustfiles" / f"{run_id}.py"
-        render_locustfile(tasks, locustfile)
+        render_locustfile(tasks, locustfile, json.loads(run.get("variables_json") or "{}"))
 
         dsn = json.loads(run["db_dsn_json"])
         env = os.environ.copy()

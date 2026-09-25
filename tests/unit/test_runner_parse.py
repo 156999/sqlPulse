@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -77,13 +78,36 @@ class TestRenderLocustfile:
         """渲染到 pytest 临时目录，避免产物被 pytest 收集。"""
         return render_locustfile(tasks, tmp_path / "lf.py")
 
+    def _fill_fn(self, tmp_path, sql):
+        """验证生成脚本可加载，并返回驱动格式化辅助函数。"""
+        tasks = parse_sql_tasks(sql)
+        out = self._render(tasks, tmp_path)
+        env_keys = ["TARGET_DB_HOST", "TARGET_DB_USER", "TARGET_DB_PASSWORD", "TARGET_DB_NAME"]
+        old = {k: os.environ.get(k) for k in env_keys}
+        os.environ.update({k: "x" for k in env_keys})
+        try:
+            ns = {}
+            exec(compile(out, "locustfile.py", "exec"), ns)
+            from app.services.sql_params import compile_statement
+            import pymysql
+            connection = pymysql.connect(defer_connect=True)
+            connection.server_status = 0
+            cursor = connection.cursor()
+            return lambda text: cursor.mogrify(*compile_statement(text).bind({}))
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_valid_python(self, tmp_path):
         tasks = parse_sql_tasks(
             "-- weight: 70\nSELECT * FROM orders WHERE id = 1;\n-- weight: 30\nSELECT '含中文;分号' FROM t"
         )
         out = self._render(tasks, tmp_path)
         assert "@task(70)" in out and "@task(30)" in out
-        assert 'self._exec("sql_1"' in out
+        assert 'self._exec("sql_1")' in out
         compile(out, "locustfile.py", "exec")  # 语法合法
 
     def test_statements_escaping(self, tmp_path):
@@ -103,7 +127,7 @@ class TestRenderLocustfile:
         compile(out, "locustfile.py", "exec")  # 语法合法
 
     def test_fill_runtime_substitution(self, tmp_path):
-        """执行渲染产物，验证 _fill 占位符运行时替换正确（字符串保留引号）。"""
+        """验证驱动参数绑定后的字符串引号与数字。"""
         tasks = parse_sql_tasks("SELECT * FROM t WHERE id = {{rand(1,5)}};")
         out = self._render(tasks, tmp_path)
         env_keys = ["TARGET_DB_HOST", "TARGET_DB_USER", "TARGET_DB_PASSWORD", "TARGET_DB_NAME"]
@@ -112,12 +136,62 @@ class TestRenderLocustfile:
         try:
             ns = {}
             exec(compile(out, "locustfile.py", "exec"), ns)
-            filled = ns["_fill"]("sku = {{pick('A','B')}} AND id = {{rand(1,5)}}")
-            import re as _re
-            assert _re.fullmatch(r"sku = '(A|B)' AND id = [1-5]", filled), filled
+            fill = self._fill_fn(tmp_path, "SELECT 1")
+            filled = fill("sku = {{pick('A','B')}} AND id = {{rand(1,5)}}")
+            assert re.fullmatch(r"sku = '(A|B)' AND id = [1-5]", filled), filled
         finally:
             for k, v in old.items():
                 if v is None:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+    def test_extended_placeholders_runtime_substitution(self, tmp_path):
+        """randf / randstr / randdate / randdt / uuid 输出格式与引号规则。"""
+        sql = (
+            "SELECT {{randf(0.5,1.5,3)}}, {{randstr(10)}};"
+            "\n-- weight: 5\nSELECT {{randdate('2026-01-01','2026-12-31')}};"
+            "\n-- weight: 5\nSELECT {{randdt('2026-01-01 00:00:00','2026-01-02 00:00:00')}};"
+            "\n-- weight: 5\nSELECT {{uuid()}};"
+        )
+        fill = self._fill_fn(tmp_path, sql)
+        for _ in range(20):
+            filled = fill(
+                "SELECT {{randf(0.5,1.5,3)}}, {{randstr(10)}}, "
+                "{{randdate('2026-01-01','2026-12-31')}}, "
+                "{{randdt('2026-01-01 00:00:00','2026-01-02 00:00:00')}}, {{uuid()}}"
+            )
+            assert re.fullmatch(
+                r"SELECT \d\.\d{3}, '[a-z0-9]{10}', "
+                r"'[0-9]{4}-[0-9]{2}-[0-9]{2}', "
+                r"'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}', "
+                r"'[0-9a-f-]{36}'",
+                filled,
+            ), filled
+
+    def test_pick_mixed_literals_quoting(self, tmp_path):
+        """pick 支持数字/字符串混合，字符串自动补 SQL 引号。"""
+        fill = self._fill_fn(tmp_path, "SELECT {{pick(1,'A',2.5)}};")
+        for _ in range(30):
+            picked = fill("{{pick(1,'A',2.5)}}")
+            assert picked in ("1", "'A'", "2.5e0"), picked
+
+    def test_pickw_weighted_choices(self, tmp_path):
+        """pickw 只输出合法候选项（带引号），不出现权重或分隔符。"""
+        fill = self._fill_fn(tmp_path, "SELECT {{pickw(('a',30),('b',70))}};")
+        values = {fill("{{pickw(('a',30),('b',70))}}") for _ in range(60)}
+        assert values <= {"'a'", "'b'"}
+        assert values
+
+    def test_invalid_placeholder_args_raise(self, tmp_path):
+        """非法参数或倒置范围应抛 ValueError，由执行层记为请求失败。"""
+        fill = self._fill_fn(tmp_path, "SELECT 1;")
+        for bad in (
+            "{{randf('a')}}",
+            "{{randf(1,2,99)}}",
+            "{{randdate('2026-05-01','2026-01-01')}}",
+            "{{randdt('2026-05-01 00:00:00','2026-01-01 00:00:00')}}",
+            "{{pickw(('a',-1),('b',1))}}",
+        ):
+            with pytest.raises(ValueError):
+                fill(bad)

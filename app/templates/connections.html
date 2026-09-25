@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}连接管理 · SQL Pulse{% endblock %}
+{% block nav_connections %}class="active"{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>连接管理</h1>
+  <button type="button" id="btn-create" class="primary">新建连接</button>
+</div>
+<div id="conn-feedback" class="hint"></div>
+
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>名称</th>
+        <th>地址</th>
+        <th>用户</th>
+        <th>数据库</th>
+        <th>密码</th>
+        <th>更新时间</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for conn in connections %}
+      <tr data-id="{{ conn.id }}">
+        <td>{{ conn.name }}</td>
+        <td><code>{{ conn.host }}:{{ conn.port }}</code></td>
+        <td>{{ conn.user }}</td>
+        <td>{{ conn.database }}</td>
+        <td>{% if conn.has_password %}已设置{% else %}<span class="muted">未设置</span>{% endif %}</td>
+        <td>{{ conn.updated_at }}</td>
+        <td class="ops">
+          <a href="#" class="test-conn" data-id="{{ conn.id }}">测试</a>
+          <a href="#" class="edit-conn" data-id="{{ conn.id }}">编辑</a>
+          <a href="#" class="delete-conn danger-link" data-id="{{ conn.id }}">删除</a>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">暂无已保存连接，点击右上角“新建连接”开始</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div id="conn-modal" class="modal-mask" style="display:none">
+  <div class="modal">
+    <h3 id="modal-title">新建连接</h3>
+    <form id="conn-form">
+      <input type="hidden" id="c-id">
+      <div class="form-row">
+        <label>名称</label>
+        <input type="text" id="c-name" required maxlength="100" placeholder="例如：订单库 / 压测环境-主库">
+      </div>
+      <div class="grid4">
+        <div><label>Host</label><input type="text" id="c-host" required maxlength="255"></div>
+        <div><label>Port</label><input type="number" id="c-port" min="1" max="65535"></div>
+        <div><label>User</label><input type="text" id="c-user" required maxlength="255"></div>
+        <div><label>Database</label><input type="text" id="c-database" required maxlength="255"></div>
+      </div>
+      <div class="form-row">
+        <label>密码</label>
+        <input type="password" id="c-password" maxlength="1024" placeholder="编辑时留空表示保持原密码">
+      </div>
+      <div id="conn-form-error" class="hint err"></div>
+      <div class="form-actions">
+        <button type="button" id="btn-cancel" class="secondary">取消</button>
+        <button type="submit" id="btn-save" class="primary">保存</button>
+        <button type="button" id="btn-save-test" class="secondary">保存并测试</button>
+        <span id="modal-feedback" class="hint"></span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+const CONNECTIONS = {{ connections|tojson }};
+const DEFAULT_DSN = {{ default_dsn|tojson }};
+const modal = document.getElementById('conn-modal');
+
+function feedback(text, ok) {
+  const el = document.getElementById('conn-feedback');
+  el.textContent = text;
+  el.className = ok ? 'hint ok' : 'hint err';
+}
+
+function openModal(conn) {
+  document.getElementById('modal-title').textContent = conn ? '编辑连接' : '新建连接';
+  document.getElementById('c-id').value = conn ? conn.id : '';
+  document.getElementById('c-name').value = conn ? conn.name : '';
+  document.getElementById('c-host').value = conn ? conn.host : DEFAULT_DSN.host;
+  document.getElementById('c-port').value = conn ? conn.port : DEFAULT_DSN.port;
+  document.getElementById('c-user').value = conn ? conn.user : DEFAULT_DSN.user;
+  document.getElementById('c-database').value = conn ? conn.database : DEFAULT_DSN.database;
+  document.getElementById('c-password').value = '';
+  document.getElementById('conn-form-error').textContent = '';
+  document.getElementById('modal-feedback').textContent = '';
+  modal.style.display = '';
+}
+
+function closeModal() {
+  modal.style.display = 'none';
+}
+
+function formPayload() {
+  return {
+    name: document.getElementById('c-name').value,
+    host: document.getElementById('c-host').value,
+    port: +document.getElementById('c-port').value,
+    user: document.getElementById('c-user').value,
+    password: document.getElementById('c-password').value,
+    database: document.getElementById('c-database').value,
+  };
+}
+
+async function saveConn(andTest) {
+  const id = document.getElementById('c-id').value;
+  const url = id ? '/api/connections/' + id : '/api/connections';
+  const method = id ? 'PUT' : 'POST';
+  const payload = formPayload();
+  const errEl = document.getElementById('conn-form-error');
+  const doneEl = document.getElementById('modal-feedback');
+  errEl.textContent = '';
+  doneEl.textContent = '保存中...';
+  doneEl.className = 'hint';
+  try {
+    const resp = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = '✗ ' + (data.detail || '保存失败');
+      doneEl.textContent = '';
+      return;
+    }
+    if (andTest) {
+      const testResp = await fetch('/api/connections/' + data.id + '/test', {method: 'POST'});
+      const result = await testResp.json();
+      if (!result.ok) {
+        errEl.textContent = '✓ 已保存，但测试失败：' + (result.error || '未知错误');
+        doneEl.textContent = '';
+        return;
+      }
+    }
+    doneEl.textContent = '✓ 已保存';
+    doneEl.className = 'hint ok';
+    setTimeout(() => location.reload(), 600);
+  } catch (err) {
+    errEl.textContent = '✗ ' + err;
+    doneEl.textContent = '';
+  }
+}
+
+document.getElementById('btn-create').addEventListener('click', () => openModal(null));
+document.getElementById('btn-cancel').addEventListener('click', closeModal);
+document.getElementById('btn-save').addEventListener('click', () => saveConn(false));
+document.getElementById('btn-save-test').addEventListener('click', () => saveConn(true));
+document.getElementById('conn-form').addEventListener('submit', e => {
+  e.preventDefault();
+  saveConn(false);
+});
+
+document.querySelectorAll('.edit-conn').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const conn = CONNECTIONS.find(c => c.id === a.dataset.id);
+    if (conn) openModal(conn);
+  });
+});
+
+document.querySelectorAll('.test-conn').forEach(a => {
+  a.addEventListener('click', async e => {
+    e.preventDefault();
+    feedback('测试中...', false);
+    const resp = await fetch('/api/connections/' + a.dataset.id + '/test', {method: 'POST'});
+    const data = await resp.json();
+    feedback(data.ok ? '✓ 连接成功' : '✗ ' + (data.error || '连接失败'), data.ok);
+  });
+});
+
+document.querySelectorAll('.delete-conn').forEach(a => {
+  a.addEventListener('click', async e => {
+    e.preventDefault();
+    if (!confirm('确认删除该连接？历史任务中的 DSN 快照不受影响。')) return;
+    const resp = await fetch('/api/connections/' + a.dataset.id, {method: 'DELETE'});
+    const data = await resp.json();
+    if (resp.ok) {
+      feedback('✓ 已删除', true);
+      setTimeout(() => location.reload(), 400);
+    } else {
+      feedback('✗ ' + (data.detail || '删除失败'), false);
+    }
+  });
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+});
+</script>
+{% endblock %}

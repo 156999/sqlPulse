@@ -9,6 +9,7 @@ from app.config import settings
 from app.services.runner import now_iso
 from app.services.script_runner import run_script_job
 from app.services.sql_executor import execute_sql_job, split_sql_statements
+from app.services.sql_params import compile_statement, compile_variables
 
 
 class DataGenExecutor:
@@ -76,13 +77,19 @@ class DataGenExecutor:
             if job["mode"] == "sql":
                 (job_dir / "input.sql").write_text(content, encoding="utf-8")
                 statements = split_sql_statements(content)
+                definitions = compile_variables(payload.get("variables") or {})
+                compiled = [compile_statement(stmt, definitions, f"造数 SQL 第 {i} 条") for i, stmt in enumerate(statements, 1)]
                 status, rows, error = execute_sql_job(
                     job_id,
                     dsn,
-                    statements,
+                    compiled,
                     log_path,
                     event,
                     settings.datagen_sql_timeout_sec,
+                    row_count=int(payload.get("row_count") or 1),
+                    variable_definitions=definitions,
+                    target_table=payload.get("target_table"),
+                    unique_indexes=payload.get("unique_indexes") or [],
                 )
             else:
                 status, rows, error = run_script_job(

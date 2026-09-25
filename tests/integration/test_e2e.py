@@ -76,6 +76,29 @@ def test_db_test(client):
     assert r.json()["ok"] is True
 
 
+def test_saved_connection_e2e(client):
+    payload = {"name": f"it-conn-{int(time.time())}", **DSN}
+    r = client.post(f"{BASE}/api/connections", json=payload)
+    assert r.status_code == 201, r.text
+    conn = r.json()
+    assert "password" not in conn and conn["has_password"] is True
+
+    body = {
+        "name": "it-saved-conn", "sql_source": "paste",
+        "sql_content": (ASSETS / "good.sql").read_text(encoding="utf-8"),
+        "concurrency": 5, "spawn_rate": 5, "duration_sec": 10,
+        "connection_id": conn["id"],
+    }
+    r = client.post(f"{BASE}/api/runs", json=body)
+    assert r.status_code == 201, r.text
+    run_id = r.json()["run_id"]
+    assert _wait_status(client, run_id) == "finished"
+
+    r = client.delete(f"{BASE}/api/connections/{conn['id']}")
+    assert r.status_code == 200
+    assert client.get(f"{BASE}/api/runs/{run_id}").json()["status"] == "finished"
+
+
 def test_good_sql_e2e(client):
     run_id = _create(client, "it-good", "good.sql", duration=10)
     status = _wait_status(client, run_id)

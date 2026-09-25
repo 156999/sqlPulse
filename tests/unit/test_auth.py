@@ -13,7 +13,7 @@ from app import db
 from app.auth import hash_password, require_user, verify_password
 from app.config import settings
 from app.routers import auth as auth_router
-from app.routers import datagen, monitor, pages, reports, tasks
+from app.routers import connections, datagen, monitor, pages, reports, tasks
 from app.routers.auth import validate_registration
 
 
@@ -41,7 +41,7 @@ def auth_app(tmp_db):
         return {"status": "ok"}
 
     test_app.include_router(auth_router.router)
-    for router in (pages.router, datagen.router, tasks.router, monitor.router, reports.router):
+    for router in (pages.router, connections.router, datagen.router, tasks.router, monitor.router, reports.router):
         test_app.include_router(router, dependencies=[Depends(require_user)])
     return test_app
 

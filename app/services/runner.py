@@ -14,6 +14,7 @@ from loguru import logger
 
 from app import db
 from app.config import settings
+from app.services import explain_probe
 from app.services.sql_params import tokens, compile_tasks
 
 WEIGHT_RE = re.compile(r"^\s*--\s*weight:\s*(\d+)", re.IGNORECASE)
@@ -95,6 +96,17 @@ def parse_sql_tasks(sql_text: str) -> list:
     return tasks
 
 
+def resolve_tasks(run: dict) -> list:
+    """run 行 → tasks。表单分组与文本模式两条来源，`start()` 与采集共用同一份逻辑。"""
+    saved_groups = json.loads(run.get("groups_json") or "[]")
+    if saved_groups:
+        # 延迟 import：run_form 反向 import 了本模块（parse_sql_tasks / split_statements）
+        from app.services.run_form import group_tasks
+
+        return group_tasks(saved_groups)[0]
+    return parse_sql_tasks(run["sql_content"])
+
+
 def render_locustfile(tasks: list, out_path: Path, variables=None) -> str:
     compile_tasks(tasks, variables or {})
     env = Environment(
@@ -133,20 +145,18 @@ class LocustRunner:
         run = db.get_run(run_id)
         if not run:
             raise KeyError(run_id)
-        saved_groups = json.loads(run.get("groups_json") or "[]")
-        if saved_groups:
-            from app.services.run_form import group_tasks
-            tasks = group_tasks(saved_groups)[0]
-        else:
-            tasks = parse_sql_tasks(run["sql_content"])
+        tasks = resolve_tasks(run)
         if not tasks:
             db.update_run(run_id, {"status": "failed", "error_msg": "没有可执行的 SQL 语句", "ended_at": now_iso()})
             raise ValueError("没有可执行的 SQL 语句")
 
+        variables = json.loads(run.get("variables_json") or "{}")
         locustfile = settings.data_dir / "locustfiles" / f"{run_id}.py"
-        render_locustfile(tasks, locustfile, json.loads(run.get("variables_json") or "{}"))
+        render_locustfile(tasks, locustfile, variables)
 
         dsn = json.loads(run["db_dsn_json"])
+        # EXPLAIN 采集**不在这里**做 —— 它已移到压测结束后的收尾路径，见
+        # `_probe_explain_after_run()` 与 docs/design/explain-collection.md「采集时机」。
         env = os.environ.copy()
         env.update(
             {
@@ -216,11 +226,48 @@ class LocustRunner:
                 err = _tail(settings.logs_dir / f"locust_{run_id}.log")
                 db.update_run(run_id, {"status": "failed", "error_msg": err or f"locust 退出码 {code}", "ended_at": now_iso()})
         logger.info("run {} exited code={} status={}", run_id, code, db.get_run(run_id)["status"])
+        # 采集必须在 `_on_finish`（= 生成报告）**之前**：报告侧要读产物，
+        # 顺序反了就会读到 None。顺序由这个位置保证，别往下挪。
+        self._probe_explain_after_run(run_id)
         if self._on_finish:
             try:
                 self._on_finish(run_id)
             except Exception as e:
                 logger.exception("report generation failed for {}: {}", run_id, e)
+
+    def _probe_explain_after_run(self, run_id: str) -> None:
+        """压测结束后的 EXPLAIN 采集。**本方法不抛异常。**
+
+        为什么在收尾而不是启动前：EXPLAIN 只问优化器"打算怎么执行"，不启动执行器，
+        所以它的答案不需要等压测；反过来，放在启动前会同步阻塞启动最多
+        `explain_budget_sec` 秒，还会让产物在用户点"开始"之前就产生。
+        完整权衡（含这个位置固有的两个漏口）见 docs/design/explain-collection.md。
+
+        tasks / dsn / variables 全部从 run 行重新推导 —— 不依赖 `start()` 传进来的状态，
+        `_watch()` 跑在与 `start()` 不同的线程、且可能隔了几分钟，靠内存传参会很脆。
+
+        所有状态（finished / failed / cancelled）都采：用户中途取消时，
+        语句本身没变，计划依然是有用信息（这正是改造前"启动前采集"的行为）。
+        """
+        if not settings.explain_probe_enabled:
+            return
+        try:
+            run = db.get_run(run_id)
+            if not run:
+                return
+            tasks = resolve_tasks(run)
+            if not tasks:
+                return
+            explain_probe.probe(
+                run_id, tasks, json.loads(run["db_dsn_json"]),
+                variables=json.loads(run.get("variables_json") or "{}"),
+                max_statements=settings.explain_max_statements,
+                budget_sec=settings.explain_budget_sec,
+                phase=explain_probe.PHASE_POST_RUN,
+            )
+        except Exception as e:
+            # 采集失败绝不能影响报告生成（此刻 run 的状态早已落库）
+            logger.warning("explain probe after run {} failed: {}", run_id, e)
 
     def _all_failed(self, run_id: str) -> bool:
         import csv as csvmod

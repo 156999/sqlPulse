@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     datagen_max_sql_chars: int = 5_000_000
     datagen_max_script_chars: int = 500_000
 
+    # 压测结束后的 EXPLAIN 采集（只读、失败不影响报告，产物落 data/explain/）。
+    # 名字里的 probe 是历史叫法 —— 2026-09-25 前它跑在"压测启动前"，见
+    # docs/design/explain-collection.md「采集时机」。
+    explain_probe_enabled: bool = True
+    explain_max_statements: int = 50      # 单轮最多发多少条 EXPLAIN
+    explain_budget_sec: float = 15.0      # 单轮采集总时间上限
+
     auth_enabled: bool = True
     app_secret_key: str = ""
     auth_session_ttl_seconds: int = 604800
@@ -47,6 +54,7 @@ class Settings(BaseSettings):
             self.data_dir / "locustfiles",
             self.data_dir / "locust",
             self.data_dir / "datagen",
+            self.data_dir / "explain",
             self.reports_dir,
         ):
             p.mkdir(parents=True, exist_ok=True)

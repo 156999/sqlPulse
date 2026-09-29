@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 from pathlib import Path
@@ -8,7 +9,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 BASE = "http://127.0.0.1:8080"
-DSN = {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "mysql123456", "database": "sqlpulse_demo"}
+DSN = {
+    "host": os.environ["TEST_DB_HOST"],
+    "port": int(os.environ["TEST_DB_PORT"]),
+    "user": "root",
+    "password": os.environ["TEST_DB_PASSWORD"],
+    "database": "sqlpulse_demo",
+}
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
 
 pytestmark = pytest.mark.integration
@@ -35,6 +42,20 @@ def _wait_status(client, run_id, timeout=90):
             return status
         time.sleep(1)
     raise TimeoutError(run_id)
+
+
+def _wait_report(client, run_id, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        response = client.get(f"{BASE}/api/runs/{run_id}/report/download", timeout=remaining)
+        if response.status_code == 200:
+            return response
+        assert response.status_code == 404, response.text
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise TimeoutError(f"Report not ready for run {run_id}")
 
 
 @pytest.fixture(scope="module")
@@ -107,7 +128,7 @@ def test_good_sql_e2e(client):
     points = r.json()["points"]
     assert 5 <= len(points) <= 15  # ≈10s 采样
     assert any(p["qps"] and p["qps"] > 0 for p in points)
-    r = client.get(f"{BASE}/api/runs/{run_id}/report/download")
+    r = _wait_report(client, run_id)
     assert r.status_code == 200 and "压测报告" in r.text
 
 

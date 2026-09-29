@@ -10,10 +10,11 @@ from loguru import logger
 from app import db
 from app.auth import get_current_user, require_user
 from app.config import settings
-from app.models import DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
+from app.models import DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
 from app.services.datagen import datagen_executor
 from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
+from app.services.datagen_dependencies import build_dependency_plan
 from app.services.runner import now_iso
 from app.services.script_runner import tail_file
 from app.templating import templates
@@ -140,7 +141,10 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
         "input_json": json.dumps({"source": body.source, "content": content,
                                    "variables": body.variables, "row_count": body.row_count,
                                    "target_table": body.target_table, "field_rules": applied_rules,
-                                   "unique_indexes": unique_indexes}, ensure_ascii=False),
+                                   "unique_indexes": unique_indexes,
+                                   "dependency_strategy": body.dependency_strategy,
+                                   "dependency_plan": body.dependency_plan,
+                                   "confirm_dependency_writes": body.confirm_dependency_writes}, ensure_ascii=False),
         "created_at": now_iso(),
     }
     db.create_datagen_job(row)
@@ -152,6 +156,19 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
         logger.exception("start datagen job {} failed", job_id)
         raise HTTPException(status_code=500, detail=f"启动造数任务失败：{e}")
     return {"job_id": job_id}
+
+
+@router.post("/api/datagen/dependency-plan")
+def get_datagen_dependency_plan(body: DataGenDependencyPlanRequest, user: Optional[dict] = Depends(require_user)):
+    dsn = _resolve_body_dsn(body, user)
+    try:
+        return build_dependency_plan(dsn.model_dump() if hasattr(dsn, "model_dump") else dsn,
+                                     body.table, body.target_rows, body.strategy)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("build datagen dependency plan failed")
+        raise HTTPException(status_code=400, detail=f"分析依赖表失败：{exc}")
 
 
 @router.post("/api/datagen/metadata")

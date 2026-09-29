@@ -65,6 +65,12 @@
       </div>
       <p class="hint">系统会自动读取列名和字段类型；自增列、生成列和有默认值的列默认跳过。</p>
       <div id="form-metadata-result" class="hint"></div>
+      <details class="advice advice-info" id="dependency-plan-panel">
+        <summary>依赖表与唯一组合空间</summary>
+        <div class="form-row"><label>依赖策略</label><select id="f-dependency-strategy"><option value="target_only" selected>仅生成目标表</option><option value="direct_dependencies">自动补充直接依赖表（计划预览）</option><option value="full_dependencies">自动补充完整依赖链（计划预览）</option></select></div>
+        <div id="dependency-plan-result" class="hint">读取目标表结构后分析依赖。</div>
+        <label><input type="checkbox" id="f-confirm-dependency-writes"> 我知道本次会向依赖表写入数据</label>
+      </details>
       <div class="variable-scroll"><table class="table metadata-table"><thead><tr><th>字段</th><th>类型/限制</th><th>生成方式</th><th>生成参数</th><th>样本比例</th><th>状态</th></tr></thead><tbody id="form-field-list"></tbody></table></div>
     </div>
 
@@ -171,6 +177,10 @@ const datagenTypes = {rand:'随机整数', randf:'随机小数', pick:'随机枚
 let datagenVariables = [], datagenEditor = null, datagenSelection = [0, 0], datagenMetadata = null;
 let formMetadata = null, formRules = {}, formRulesValid = false, formVariables = {};
 const datagenDefaults = {rand:['1','10000'], randf:['0','100','2'], pick:['new','paid'], randstr:['16'], randdate:['2026-01-01','2026-12-31'], randdt:['2026-01-01 00:00:00','2026-12-31 23:59:59'], uuid:[], sample:['users','id','100','rand(1,10000)']};
+function clientId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 function datagenRememberEditor(node) {
   ['focus','click','keyup','select','blur'].forEach(event => node.addEventListener(event, () => { datagenEditor = node; datagenSelection = [node.selectionStart, node.selectionEnd]; }));
 }
@@ -210,8 +220,8 @@ function datagenVariableText() {
 }
 function loadDatagenVariables(value) {
   datagenVariables = [];
-  if (typeof value === 'string') value.split('\n').forEach(line => { const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/); if (m) datagenVariables.push({id: crypto.randomUUID(), name:m[1], type:'rand', args:['1','10000']}); });
-  else Object.entries(value || {}).forEach(([name, expression]) => { const m = String(expression).match(/^([A-Za-z]+)\((.*)\)$/); datagenVariables.push({id:crypto.randomUUID(), name, type:m && datagenTypes[m[1]] ? m[1] : 'rand', args:m ? (m[1] === 'sample' ? [m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[1] || 'users', m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[2] || 'id', '100', 'rand(1,10000)'] : m[2].split(',').map(x=>x.trim().replace(/^['"]|['"]$/g,''))) : ['1','10000']}); });
+  if (typeof value === 'string') value.split('\n').forEach(line => { const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/); if (m) datagenVariables.push({id: clientId(), name:m[1], type:'rand', args:['1','10000']}); });
+  else Object.entries(value || {}).forEach(([name, expression]) => { const m = String(expression).match(/^([A-Za-z]+)\((.*)\)$/); datagenVariables.push({id:clientId(), name, type:m && datagenTypes[m[1]] ? m[1] : 'rand', args:m ? (m[1] === 'sample' ? [m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[1] || 'users', m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[2] || 'id', '100', 'rand(1,10000)'] : m[2].split(',').map(x=>x.trim().replace(/^['"]|['"]$/g,''))) : ['1','10000']}); });
   renderDatagenVariables();
 }
 function renderDatagenVariables() {
@@ -305,7 +315,7 @@ $id('f-target-table').addEventListener('change', saveForm);
 $id('f-sql').addEventListener('input', saveForm);
 datagenRememberEditor($id('f-sql'));
 $id('f-script').addEventListener('input', saveForm);
-$id('btn-add-datagen-variable').addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); datagenVariables.push({id:crypto.randomUUID(),name:'',type:'rand',args:['1','10000']}); renderDatagenVariables(); saveForm(); });
+$id('btn-add-datagen-variable').addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); datagenVariables.push({id:clientId(),name:'',type:'rand',args:['1','10000']}); renderDatagenVariables(); saveForm(); });
 
 async function readFile(input, target, maxChars) {
   const file = input.files[0];
@@ -362,6 +372,7 @@ function datagenConnectionBody() {
   return {db_dsn: dsn()};
 }
 let formTableLoadTimer = null;
+let dependencyPlan = null;
 async function loadFormTableOptions(query='') {
   const list=$id('form-table-options');
   try {
@@ -416,12 +427,31 @@ async function refreshMetadata(validateOnly=false) {
     const data = await resp.json();
     if (!resp.ok) throw Error(data.detail || '请求失败');
     renderMetadata(validateOnly ? data.metadata : data, validateOnly ? data.errors : []);
+    if (!validateOnly) await refreshDependencyPlan();
     hint.textContent = validateOnly && data.errors.length ? `✗ ${data.errors.length} 个规则问题` : '✓ 已应用数据库限制';
     hint.className = validateOnly && data.errors.length ? 'hint err' : 'hint ok';
   } catch (err) {
     hint.textContent = '✗ ' + err.message; hint.className = 'hint err';
   }
 }
+$id('f-dependency-strategy').addEventListener('change', refreshDependencyPlan);
+async function refreshDependencyPlan() {
+  const table = $id('f-form-table').value.trim();
+  const hint = $id('dependency-plan-result');
+  if (!table) return;
+  hint.textContent = '依赖分析中...'; hint.className = 'hint';
+  try {
+    const body = {...datagenConnectionBody(), table, target_rows:+$id('f-form-row-count').value || 1, strategy:$id('f-dependency-strategy').value};
+    const resp = await fetch('/api/datagen/dependency-plan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const data = await resp.json(); if (!resp.ok) throw Error(data.detail || '依赖分析失败');
+    dependencyPlan = data;
+    const deps = (data.dependencies || []).map(item => `${item.table}：当前 ${item.current_rows}，建议补 ${item.planned_rows} 条（${item.reason}）`).join('\n');
+    const spaces = (data.unique_spaces || []).map(item => `${item.index}(${item.columns.join(' + ')}): 理论 ${item.total_space}，已占用 ${item.occupied_space}，剩余 ${item.available_space}，目标 ${item.required_rows}`).join('\n');
+    hint.textContent = [deps ? '依赖表：\n' + deps : '未发现依赖表', spaces ? '唯一组合：\n' + spaces : '', (data.warnings || []).join('\n')].filter(Boolean).join('\n');
+    hint.className = data.warnings?.length ? 'hint err' : 'hint ok';
+  } catch (err) { dependencyPlan = null; hint.textContent = '✗ ' + err.message; hint.className = 'hint err'; }
+}
+$id('f-form-row-count').addEventListener('change', () => { if ($id('f-form-table').value.trim()) refreshDependencyPlan(); });
 $id('btn-refresh-metadata').addEventListener('click', () => refreshMetadata(false));
 $id('btn-validate-rules').addEventListener('click', () => refreshMetadata(true));
 
@@ -552,6 +582,12 @@ $id('datagen-form').addEventListener('submit', async (e) => {
     body.target_table = $id('f-form-table').value.trim();
     body.field_rules = Object.values(formRules);
     body.variables = formVariables;
+    body.dependency_strategy = $id('f-dependency-strategy').value;
+    body.dependency_plan = dependencyPlan || {};
+    body.confirm_dependency_writes = $id('f-confirm-dependency-writes').checked;
+    if (body.dependency_strategy !== 'target_only' && (dependencyPlan?.dependencies || []).some(item => item.planned_rows > 0) && !body.confirm_dependency_writes) {
+      hint.textContent = '✗ 请确认允许向依赖表写入数据'; hint.className = 'hint err'; return;
+    }
   }
   if (mode === 'sql') {
     try { body.variables = datagenVariableText(); }

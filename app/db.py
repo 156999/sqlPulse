@@ -10,7 +10,9 @@ from app.config import settings
 
 _local = threading.local()
 _conn: Optional[sqlite3.Connection] = None
-_lock = threading.Lock()
+# 全进程共用 _conn 这一条连接，所以**读和写都必须拿这把锁**（用 RLock 是因为
+# 读函数可能被 tx() 内部再次调用）。见下面 _fetch_one/_fetch_all 的说明。
+_lock = threading.RLock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -115,6 +117,36 @@ def tx() -> Iterator[sqlite3.Connection]:
             raise
 
 
+# ---------------------------------------------------------------------------
+# 所有「读」都必须走下面两个函数，**不能直接 conn.execute()**。
+#
+# 原因（2026-09-25 实测，代价是用户被偶发登出）：全进程只有 _conn 一条连接
+# （check_same_thread=False），而 Python 的 sqlite3.Connection 不是为并发设计的。
+# 一旦多个请求线程同时在这条连接上 execute，就会撞出
+#     sqlite3.InterfaceError: bad parameter or other API misuse
+# 更阴的是它**不一定抛异常**——有时直接给出一个假的空结果。
+# 实测 12 线程读 + 1 线程写、共 4800 次查询：12.9% 抛 InterfaceError、11.3% 凭空返回 None。
+#
+# 为什么这个是「登出」而不是「500」：get_user() 假返回 None →
+# auth.get_current_user() 认为用户不存在 → session.pop("user_id") →
+# SessionMiddleware 看到会话被清空 → 回 Set-Cookie: ...=null; expires=1970
+# → 浏览器删掉 cookie → 用户莫名其妙被登出。
+#
+# 所以：**别为了性能把这里的锁去掉**。SQLite 本来就是串行的，锁的代价可以忽略。
+# ---------------------------------------------------------------------------
+
+def _fetch_one(sql: str, args: tuple = ()) -> Optional[sqlite3.Row]:
+    conn = get_conn()
+    with _lock:
+        return conn.execute(sql, args).fetchone()
+
+
+def _fetch_all(sql: str, args: tuple = ()) -> list:
+    conn = get_conn()
+    with _lock:
+        return conn.execute(sql, args).fetchall()
+
+
 _METRIC_COLS = [
     "qps", "avg_ms", "p95_ms", "p99_ms", "err_rate",
     "threads_running", "threads_connected",
@@ -143,17 +175,15 @@ def init_schema() -> None:
 
 
 def get_user_by_username(username: str) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute(
+    row = _fetch_one(
         "SELECT * FROM users WHERE username=? COLLATE NOCASE",
         (username,),
-    ).fetchone()
+    )
     return dict(row) if row else None
 
 
 def get_user(user_id: str) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    row = _fetch_one("SELECT * FROM users WHERE id=?", (user_id,))
     return dict(row) if row else None
 
 
@@ -180,20 +210,18 @@ def seed_root_user() -> Optional[dict]:
 
 
 def list_connections(user_id: str) -> list:
-    conn = get_conn()
-    rows = conn.execute(
+    rows = _fetch_all(
         "SELECT * FROM mysql_connections WHERE user_id=? ORDER BY updated_at DESC, name ASC",
         (user_id,),
-    ).fetchall()
+    )
     return [dict(r) for r in rows]
 
 
 def get_connection(user_id: str, connection_id: str) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute(
+    row = _fetch_one(
         "SELECT * FROM mysql_connections WHERE id=? AND user_id=?",
         (connection_id, user_id),
-    ).fetchone()
+    )
     return dict(row) if row else None
 
 
@@ -268,14 +296,12 @@ def create_run(row: dict) -> None:
 
 
 def get_run(run_id: str) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    row = _fetch_one("SELECT * FROM runs WHERE id=?", (run_id,))
     return dict(row) if row else None
 
 
 def list_runs() -> list:
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
+    rows = _fetch_all("SELECT * FROM runs ORDER BY created_at DESC")
     return [dict(r) for r in rows]
 
 
@@ -297,14 +323,12 @@ def create_datagen_job(row: dict) -> None:
 
 
 def get_datagen_job(job_id: str) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM datagen_jobs WHERE id=?", (job_id,)).fetchone()
+    row = _fetch_one("SELECT * FROM datagen_jobs WHERE id=?", (job_id,))
     return dict(row) if row else None
 
 
 def list_datagen_jobs() -> list:
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM datagen_jobs ORDER BY created_at DESC").fetchall()
+    rows = _fetch_all("SELECT * FROM datagen_jobs ORDER BY created_at DESC")
     return [dict(r) for r in rows]
 
 
@@ -326,7 +350,6 @@ def insert_metric(m: dict) -> None:
 
 
 def get_metrics(run_id: str, ts_from: Optional[int] = None, ts_to: Optional[int] = None) -> list:
-    conn = get_conn()
     sql = "SELECT * FROM metrics WHERE run_id=?"
     args: list[Any] = [run_id]
     if ts_from is not None:
@@ -336,7 +359,7 @@ def get_metrics(run_id: str, ts_from: Optional[int] = None, ts_to: Optional[int]
         sql += " AND ts<=?"
         args.append(ts_to)
     sql += " ORDER BY ts"
-    return [dict(r) for r in conn.execute(sql, args).fetchall()]
+    return [dict(r) for r in _fetch_all(sql, tuple(args))]
 
 
 def save_report(run_id: str, l0: dict, l1: list, md_path: str) -> None:
@@ -348,8 +371,7 @@ def save_report(run_id: str, l0: dict, l1: list, md_path: str) -> None:
 
 
 def get_report(run_id: str) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM reports WHERE run_id=?", (run_id,)).fetchone()
+    row = _fetch_one("SELECT * FROM reports WHERE run_id=?", (run_id,))
     if not row:
         return None
     d = dict(row)

@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}执行计划 · {{ view.run_id }} · SQL Pulse{% endblock %}
+{% block nav_runs %}class="active"{% endblock %}
+{% block content %}
+<style>
+  .ex-good { color: #059669; font-weight: 600; }
+  .ex-ok { color: #4b5563; }
+  .ex-warn { color: #d97706; font-weight: 600; }
+  .ex-bad { color: #dc2626; font-weight: 600; }
+  .ex-unknown { color: #9ca3af; }
+  .advice-ok { border-color: #059669; background: #ecfdf5; }
+  .ex-badge { display: inline-block; padding: 2px 9px; border-radius: 10px;
+              font-size: 12px; color: #fff; background: #6b7280; white-space: nowrap; }
+  .ex-badge-ok { background: #059669; }
+  .ex-badge-muted { background: #9ca3af; }
+  .ex-badge-warn { background: #d97706; }
+  .ex-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+  .ex-stat-label { font-size: 12px; color: #6b7280; }
+  .ex-stat-value { font-size: 15px; color: #111827; margin-top: 2px; word-break: break-all; }
+  .ex-stat-sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
+  .ex-stmt { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+  .ex-stmt-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .ex-tag { display: inline-block; font-size: 12px; border: 1px solid #e5e7eb;
+            background: #f9fafb; border-radius: 8px; padding: 1px 7px; margin-right: 6px; }
+  .ex-kv { font-size: 12px; color: #6b7280; }
+  .ex-params { font-size: 12px; color: #6b7280; margin: 6px 0 0; }
+  .ex-params code { background: #f3f4f6; border-radius: 4px; padding: 0 4px; }
+  /* 不产生执行计划的语句（事务控制 / SET / 超额度）不单独占卡片，收进一行折叠摘要 */
+  .ex-skipped { border: 1px dashed #e5e7eb; border-radius: 8px; padding: 10px 14px;
+                background: #fafafa; margin-top: 4px; }
+  .ex-skipped > summary { cursor: pointer; font-size: 13px; color: #6b7280; }
+</style>
+
+<h1>执行计划 <small class="muted">{{ view.run_name or view.run_id }} · {{ view.run_id }}</small></h1>
+
+<p class="hint">
+  <a href="/runs/{{ view.run_id }}/monitor">实时监控</a> ·
+  <a href="/runs/{{ view.run_id }}/report">压测报告</a> ·
+  <a href="/api/runs/{{ view.run_id }}/explain">原始 JSON</a>
+</p>
+
+{% if not view.available %}
+  <div class="card muted">{{ view.hint }}</div>
+{% else %}
+
+  <div class="advice {{ view.headline.cls }}">
+    <strong>{{ view.headline.title }}</strong>
+    <p>{{ view.headline.detail }}</p>
+  </div>
+
+  <div class="card">
+    <h3>采集概况</h3>
+    <div class="ex-stats">
+      {% for s in view.stats %}
+      <div>
+        <div class="ex-stat-label">{{ s.label }}</div>
+        <div class="ex-stat-value">{{ s.value }}</div>
+        {% if s.sub %}<div class="ex-stat-sub">{{ s.sub }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <p class="hint" style="margin-top:14px">
+      压测结束{% if view.phase == 'post_run' %}后{% endif %}采集 · {{ view.generated_at }} · 产物格式 v{{ view.probe_version }}
+      {% if view.truncated %} · <span class="ex-warn">本轮采集被截断（{{ view.truncated_reason }}），部分语句未做 EXPLAIN</span>{% endif %}
+    </p>
+    {% if view.error %}<p class="err-msg">采集错误：<code>{{ view.error }}</code></p>{% endif %}
+  </div>
+
+  {% for t in view.tasks %}
+  <div class="card">
+    <h3>
+      <code>{{ t.sql_id }}</code>
+      <span class="tag">权重 {{ t.weight }}</span>
+      <span class="tag">{{ t.statements|length }} 条语句</span>
+      {% if t.skipped %}<span class="tag">{{ t.skipped|length }} 条未采集</span>{% endif %}
+    </h3>
+
+    {% for s in t.shown %}
+    <div class="ex-stmt">
+      <div class="ex-stmt-head">
+        <span class="ex-badge {{ s.status_badge }}">{{ s.status_label }}</span>
+        <strong>#{{ s.no }}</strong>
+        {% if s.max_rows %}<span class="ex-kv">预估扫描 {{ s.max_rows }} 行</span>{% endif %}
+      </div>
+
+      <pre class="sql-view">{{ s.original }}</pre>
+
+      {% if s.filled %}
+      <p class="hint" style="margin:8px 0 6px">压测实际会发送的语句（占位符已绑定为典型值）：</p>
+      <pre class="sql-view">{{ s.filled }}</pre>
+      {% endif %}
+
+      {% if s.params %}
+      <p class="ex-params">
+        绑定参数：
+        {% for p in s.params %}<code>{{ p.value }}</code> <span class="muted">{{ p.type }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
+      </p>
+      {% endif %}
+
+      {% for f in s.findings %}
+      <div class="advice {{ f.cls }}" style="margin-top:10px">
+        <strong>{{ f.label }}</strong>
+        {% if f.table %}<span class="ex-kv">表 <code>{{ f.table }}</code></span>{% endif %}
+        <p>{{ f.detail }}</p>
+      </div>
+      {% endfor %}
+
+      {% if s.plan %}
+      <table class="table" style="margin-top:12px">
+        <thead>
+          <tr><th>表</th><th>查询类型</th><th>命中索引</th><th>可用索引</th><th>预估行数</th><th>Extra</th></tr>
+        </thead>
+        <tbody>
+        {% for p in s.plan %}
+          <tr>
+            <td><code>{{ p.table }}</code></td>
+            <td class="{{ p.access_cls }}">{{ p.access }}
+              {% if p.access_text %}<span class="ex-kv">{{ p.access_text }}</span>{% endif %}
+            </td>
+            <td>{% if p.key_is_null %}<span class="ex-bad">NULL</span>{% else %}<code>{{ p.key }}</code>{% endif %}</td>
+            <td class="muted">{{ p.possible_keys }}</td>
+            <td>{{ p.rows }}</td>
+            <td title="{{ p.extra }}">
+              {% for tg in p.extra_tags %}<span class="ex-tag {{ tg.cls }}">{{ tg.text }}</span>{% endfor %}
+              {% if not p.extra_tags %}<span class="muted">—</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if not t.shown %}
+    <p class="hint">这一组没有会产生执行计划的语句；压测时它们照常执行。</p>
+    {% endif %}
+
+    {% if t.skipped %}
+    <details class="ex-skipped">
+      <summary>{{ t.skipped_hint }}</summary>
+      <ul class="hint" style="margin:10px 0 0 18px; line-height:1.8">
+        {% for s in t.skipped %}
+        <li>#{{ s.no }} <code>{{ s.sql }}</code> · {{ s.status_label }}{% if s.reason %} —— {{ s.reason }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <details class="card">
+    <summary>三条已知局限（读表前先看）</summary>
+    <ul class="hint" style="margin:10px 0 0 18px; line-height:1.9">
+      {% for n in view.notes %}<li>{{ n }}</li>{% endfor %}
+    </ul>
+  </details>
+
+  <p class="hint">
+    本页只做<strong>事实的直出</strong>：查询类型、命中索引、预估行数、Extra 都来自 MySQL 的
+    EXPLAIN 输出，不执行任何 SQL、不修改数据。"为什么慢 / 该怎么改"这类推理属于
+    L2 LLM 诊断段落（预留，见 <code>app/ai/</code>）。
+  </p>
+
+{% endif %}
+{% endblock %}

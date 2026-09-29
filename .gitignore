@@ -7,3 +7,11 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# 本机开发产物（不进版本库）
+.workbuddy/
+_uvicorn.log
+_preview_*.html
+
+# 文档流水线（tencent-docx）的工作目录：草稿 / critic 报告 / 中间 HTML
+/output/

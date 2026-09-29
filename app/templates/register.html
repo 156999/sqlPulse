@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}注册 · SQL Pulse{% endblock %}
+{% block nav_register %}class="active"{% endblock %}
+{% block content %}
+<div class="auth-panel">
+  <div class="card auth-card">
+    <h1>注册 SQL Pulse</h1>
+    {% if error %}<p class="hint err auth-error">{{ error }}</p>{% endif %}
+    <form method="post" action="/register" class="auth-form">
+      <div class="form-row">
+        <label>用户名</label>
+        <input type="text" name="username" value="{{ username or '' }}" required minlength="3" maxlength="32" autocomplete="username" autofocus>
+      </div>
+      <div class="form-row">
+        <label>密码</label>
+        <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password">
+      </div>
+      <div class="form-row">
+        <label>确认密码</label>
+        <input type="password" name="password_confirm" required minlength="8" maxlength="128" autocomplete="new-password">
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="primary">注册并登录</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

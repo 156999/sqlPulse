@@ -1,0 +1,598 @@
+{% extends "base.html" %}
+{% block title %}造数 · SQL Pulse{% endblock %}
+{% block nav_datagen %}class="active"{% endblock %}
+{% block content %}
+<h1>造数</h1>
+
+<form id="datagen-form" class="card">
+  <div class="form-row">
+    <label>任务名</label>
+    <input type="text" id="f-name" required maxlength="100" placeholder="例如：订单数据补充 1 万行">
+  </div>
+
+  <fieldset>
+    <legend>目标数据库</legend>
+    <div class="conn-switch">
+      <span class="seg">
+        <button type="button" class="seg-btn {% if connections %}active{% endif %}" data-conn-mode="saved">已保存连接</button>
+        <button type="button" class="seg-btn {% if not connections %}active{% endif %}" data-conn-mode="temp">临时连接</button>
+      </span>
+    </div>
+    <div id="conn-saved" {% if not connections %}style="display:none"{% endif %}>
+      <div class="form-row">
+        <label>我的连接</label>
+        <select id="f-connection-id">
+          {% for conn in connections %}
+          <option value="{{ conn.id }}">{{ conn.name }}（{{ conn.host }}:{{ conn.port }}/{{ conn.database }}）</option>
+          {% else %}
+          <option value="">暂无已保存连接，请先到“连接管理”创建</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-test-saved" class="secondary">测试连接</button>
+        <span id="db-test-result" class="hint"></span>
+      </div>
+    </div>
+    <div id="conn-temp" {% if connections %}style="display:none"{% endif %}>
+      <div class="grid5">
+        <div><label>Host</label><input type="text" id="f-host" value="{{ default_dsn.host }}"></div>
+        <div><label>Port</label><input type="number" id="f-port" value="{{ default_dsn.port }}"></div>
+        <div><label>User</label><input type="text" id="f-user" value="{{ default_dsn.user }}"></div>
+        <div><label>Password</label><input type="password" id="f-password" value="{{ default_dsn.password }}"></div>
+        <div><label>Database</label><input type="text" id="f-database" value="{{ default_dsn.database }}"></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-test-db" class="secondary">测试连接</button>
+        <span id="db-test-result-temp" class="hint"></span>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>造数方式</legend>
+    <div class="tabs">
+      <button type="button" class="tab active" data-mode="form">单表表单</button>
+      <button type="button" class="tab" data-mode="sql">SQL</button>
+      <button type="button" class="tab" data-mode="shell">Shell</button>
+    </div>
+
+    <div id="panel-form">
+      <div class="grid3 datagen-options">
+        <div><label>目标表</label><input type="text" id="f-form-table" list="form-table-options" autocomplete="off" placeholder="输入关键字或选择数据表"><datalist id="form-table-options"></datalist></div>
+        <div><label>INSERT 生成条数</label><input type="number" id="f-form-row-count" value="1" min="1" max="1000000"></div>
+        <div class="form-actions datagen-rule-actions"><button type="button" id="btn-load-form-table" class="secondary">读取表结构</button><button type="button" id="btn-apply-form-rules" class="secondary" disabled>应用数据库规则</button></div>
+      </div>
+      <p class="hint">系统会自动读取列名和字段类型；自增列、生成列和有默认值的列默认跳过。</p>
+      <div id="form-metadata-result" class="hint"></div>
+      <div class="variable-scroll"><table class="table metadata-table"><thead><tr><th>字段</th><th>类型/限制</th><th>生成方式</th><th>生成参数</th><th>样本比例</th><th>状态</th></tr></thead><tbody id="form-field-list"></tbody></table></div>
+    </div>
+
+    <div id="panel-sql" style="display:none">
+      <div class="grid3 datagen-options">
+        <div><label>INSERT 生成条数</label><input type="number" id="f-row-count" value="1" min="1" max="1000000"><span class="hint">每条 SQL 重复执行的次数</span></div>
+      </div>
+      <textarea id="f-sql" rows="12" placeholder="INSERT INTO orders (uid, amount, status, created_at) VALUES (1, 10.5, 'new', NOW());"></textarea>
+      <p class="hint">SQL 造数与压测共用占位符：rand、randf、pick、pickw、randstr、randdate、randdt、uuid；每次 INSERT 执行前重新生成。命名变量在本次 INSERT 内复用。</p>
+      <p class="hint">增强占位符：sample('表名', '列名', {'mode':'uniform|weighted|recent','sample_size':10000}) 会在任务开始时建立只读样本缓存，直接写入 SQL 即可使用。</p>
+      <details class="advice advice-info" id="field-rules-panel" open>
+        <summary>目标表字段规则（读取数据库限制）</summary>
+        <p class="hint">填写目标表后，可读取字段类型、长度、非空、主键和唯一约束，并在提交前校验规则。</p>
+        <div class="grid3 datagen-options">
+          <div><label>目标表</label><input type="text" id="f-target-table" placeholder="例如 orders"></div>
+          <div><label>规则来源</label><select id="f-rule-source"><option value="metadata">数据库元数据</option><option value="user">用户配置优先</option></select></div>
+          <div class="form-actions datagen-rule-actions">
+            <button type="button" id="btn-refresh-metadata" class="secondary">刷新表结构</button>
+            <button type="button" id="btn-validate-rules" class="secondary">应用数据库限制</button>
+          </div>
+        </div>
+        <div id="metadata-result" class="hint"></div>
+        <div class="variable-scroll"><table class="table metadata-table"><thead><tr><th>字段</th><th>类型/限制</th><th>唯一性</th><th>空值</th><th>数据来源</th></tr></thead><tbody id="metadata-field-list"></tbody></table></div>
+      </details>
+      <div id="datagen-variable-editor" class="form-row">
+        <label>命名变量（配置后插入占位符）</label>
+        <p class="hint">先在 SQL 编辑框放置光标，再点击“插入占位符”。变量值在每次 INSERT 执行时生成。</p>
+        <div class="variable-scroll"><table class="table variable-table"><thead><tr><th>名称</th><th>生成类型</th><th>参数</th><th>操作</th></tr></thead><tbody id="datagen-variable-list"></tbody></table></div>
+        <button type="button" id="btn-add-datagen-variable" class="secondary">+ 添加变量</button>
+      </div>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">上传 .sql 文件
+          <input type="file" id="f-sql-file" accept=".sql,.txt" hidden>
+        </label>
+        <button type="button" id="btn-example-sql" class="secondary">载入示例</button>
+      </div>
+    </div>
+
+    <div id="panel-shell" style="display:none">
+      <textarea id="f-script" rows="12" placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;# 通过 TARGET_DB_* 环境变量连接目标库"></textarea>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">上传脚本
+          <input type="file" id="f-script-file" accept=".sh,.bash,.txt" hidden>
+        </label>
+        <button type="button" id="btn-example-shell" class="secondary">载入示例</button>
+      </div>
+      <details class="advice advice-info">
+        <summary>脚本环境变量</summary>
+        <pre class="sql-view">{{ env_vars|join('\n') }}</pre>
+      </details>
+      <div id="shell-switch-hint" class="hint {% if script_enabled %}ok{% else %}err{% endif %}">
+        {% if script_enabled %}Shell 执行开关已开启{% else %}Shell 执行开关未开启，提交 Shell 任务会被拒绝{% endif %}
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" id="btn-submit" class="primary">开始造数</button>
+    <span id="submit-result" class="hint"></span>
+  </div>
+</form>
+
+<h2 class="section-title">历史任务</h2>
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr><th>创建时间</th><th>名称</th><th>方式</th><th>状态</th><th>影响行数</th><th>错误信息</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td>{{ job.created_at or '-' }}</td>
+        <td>{{ job.name }}</td>
+        <td><code>{{ job.mode }}</code></td>
+        <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+        <td>{% if job.rows_affected is not none %}{{ job.rows_affected }}{% else %}-{% endif %}</td>
+        <td class="err-cell">{{ job.error_msg or '-' }}</td>
+        <td class="ops">
+          <a href="/api/datagen/jobs/{{ job.id }}/log" target="_blank">日志</a>
+          {% if job.status == 'running' %}
+            <a href="#" class="stop-job" data-id="{{ job.id }}">停止</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">暂无造数任务</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+const LS_KEY = 'sqlpulse.datagen.form';
+const scriptEnabled = {{ 'true' if script_enabled else 'false' }};
+const maxSqlChars = {{ max_sql_chars }};
+const maxScriptChars = {{ max_script_chars }};
+
+function $id(s) { return document.getElementById(s); }
+function dsn() {
+  return {host: $id('f-host').value, port: +$id('f-port').value, user: $id('f-user').value,
+          password: $id('f-password').value, database: $id('f-database').value};
+}
+const datagenTypes = {rand:'随机整数', randf:'随机小数', pick:'随机枚举', randstr:'随机字符串', randdate:'随机日期', randdt:'随机日期时间', uuid:'UUID', sample:'已有数据抽样'};
+let datagenVariables = [], datagenEditor = null, datagenSelection = [0, 0], datagenMetadata = null;
+let formMetadata = null, formRules = {}, formRulesValid = false, formVariables = {};
+const datagenDefaults = {rand:['1','10000'], randf:['0','100','2'], pick:['new','paid'], randstr:['16'], randdate:['2026-01-01','2026-12-31'], randdt:['2026-01-01 00:00:00','2026-12-31 23:59:59'], uuid:[], sample:['users','id','100','rand(1,10000)']};
+function datagenRememberEditor(node) {
+  ['focus','click','keyup','select','blur'].forEach(event => node.addEventListener(event, () => { datagenEditor = node; datagenSelection = [node.selectionStart, node.selectionEnd]; }));
+}
+function datagenLiteral(value) { return JSON.stringify(String(value)); }
+function datagenExpression(row) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(row.name)) throw Error('变量名须为字母、数字、下划线，且不能以数字开头');
+  const args = row.args || [];
+  if (row.type === 'uuid') return 'uuid()';
+  if (row.type === 'sample') {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(args[0] || '') || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(args[1] || '')) throw Error('sample 表名和列名必须是安全标识符');
+    const ratio = Number(args[2]);
+    if (!Number.isFinite(ratio) || ratio < 0 || ratio > 100) throw Error('sample 比例必须是 0～100');
+    if (ratio < 100) {
+      if (!args[3] || !/^[A-Za-z]+\s*\(.*\)$/.test(args[3])) throw Error('sample 比例低于 100% 时必须填写随机生成表达式');
+      return `sample(${datagenLiteral(args[0])},${datagenLiteral(args[1])},{'sample_ratio':${ratio},'random':${datagenLiteral(args[3])}})`;
+    }
+    return `sample(${datagenLiteral(args[0])},${datagenLiteral(args[1])},{'sample_ratio':100})`;
+  }
+  if (row.type === 'pick') {
+    if (!args.length || args.some(v => !String(v).trim())) throw Error('枚举至少需要一个非空候选值');
+    return 'pick(' + args.map(datagenLiteral).join(',') + ')';
+  }
+  if (row.type === 'rand' || row.type === 'randstr') {
+    if (!args.every(v => /^-?\d+$/.test(String(v).trim()))) throw Error(row.type + ' 参数必须是整数');
+  }
+  if (row.type === 'randf') {
+    if (!args[0] || !args[1] || !args.every((v,i) => i === 2 ? /^\d+$/.test(String(v)) : Number.isFinite(Number(v)))) throw Error('随机小数参数无效');
+  }
+  if (row.type === 'randdate' && !/^\d{4}-\d{2}-\d{2}$/.test(args[0]) ) throw Error('日期格式应为 YYYY-MM-DD');
+  if (row.type === 'randdt' && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(args[0])) throw Error('日期时间格式无效');
+  return row.type + '(' + args.map((v,i) => ['randdate','randdt'].includes(row.type) || (row.type === 'pick') ? datagenLiteral(v) : String(v)).join(',') + ')';
+}
+function datagenVariableText() {
+  const result = {};
+  datagenVariables.forEach(row => { if (row.name.trim()) result[row.name.trim()] = datagenExpression(row); });
+  return result;
+}
+function loadDatagenVariables(value) {
+  datagenVariables = [];
+  if (typeof value === 'string') value.split('\n').forEach(line => { const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/); if (m) datagenVariables.push({id: crypto.randomUUID(), name:m[1], type:'rand', args:['1','10000']}); });
+  else Object.entries(value || {}).forEach(([name, expression]) => { const m = String(expression).match(/^([A-Za-z]+)\((.*)\)$/); datagenVariables.push({id:crypto.randomUUID(), name, type:m && datagenTypes[m[1]] ? m[1] : 'rand', args:m ? (m[1] === 'sample' ? [m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[1] || 'users', m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[2] || 'id', '100', 'rand(1,10000)'] : m[2].split(',').map(x=>x.trim().replace(/^['"]|['"]$/g,''))) : ['1','10000']}); });
+  renderDatagenVariables();
+}
+function renderDatagenVariables() {
+  const list = $id('datagen-variable-list'); list.replaceChildren();
+  datagenVariables.forEach((row, index) => {
+    const tr = document.createElement('tr'); tr.className='variable-row';
+    const name = document.createElement('input'); name.value=row.name; name.placeholder='例如 user_id';
+    const type = document.createElement('select'); Object.entries(datagenTypes).forEach(([key,label])=>{const o=new Option(label,key);type.add(o);}); type.value=row.type; type.addEventListener('change',()=>{row.type=type.value;row.args=[...(datagenDefaults[row.type]||[])];renderDatagenVariables();saveForm();});
+    const params=document.createElement('div'); params.className='parameter-grid';
+    (row.args||[]).forEach((value,i)=>{const input=document.createElement('input');input.value=value;input.placeholder=row.type==='rand'?(i?'最大值':'最小值'):row.type==='sample'?(['来源表','来源列','样本比例','随机表达式'][i]||'参数'):'参数';input.addEventListener('input',()=>{row.args[i]=input.value;saveForm();});params.append(input);});
+    const ops=document.createElement('td'); ops.className='variable-ops';
+    const insert=document.createElement('button');insert.type='button';insert.className='secondary';insert.textContent='插入占位符';insert.disabled=!row.name.trim();
+    name.addEventListener('input',()=>{row.name=name.value;insert.disabled=!row.name.trim();saveForm();});
+    insert.addEventListener('click',(event)=>{event.preventDefault();event.stopPropagation();try{datagenExpression(row);if(!datagenEditor || !datagenEditor.isConnected)throw Error('请先在 SQL 编辑框中放置光标');datagenEditor.setRangeText(`\u007b\u007bvar('${row.name}')\u007d\u007d`,datagenSelection[0],datagenSelection[1],'end');datagenEditor.dispatchEvent(new Event('input',{bubbles:true}));datagenEditor.focus();datagenSelection=[datagenEditor.selectionStart,datagenEditor.selectionEnd];}catch(e){$id('submit-result').textContent='✗ '+e.message;$id('submit-result').className='hint err';}});
+    const remove=document.createElement('button');remove.type='button';remove.className='secondary danger-link';remove.textContent='删除';remove.addEventListener('click',(event)=>{event.preventDefault();event.stopPropagation();datagenVariables.splice(index,1);renderDatagenVariables();saveForm();});ops.append(insert,remove);
+    const c1=document.createElement('td');c1.append(name);const c2=document.createElement('td');c2.append(type);const c3=document.createElement('td');c3.append(params);tr.append(c1,c2,c3,ops);list.append(tr);
+  });
+}
+function activeMode() { return document.querySelector('.tab[data-mode].active').dataset.mode; }
+function connMode() { return document.querySelector('.seg-btn[data-conn-mode].active').dataset.connMode; }
+function switchConnMode(mode) {
+  document.querySelectorAll('.seg-btn[data-conn-mode]').forEach(b => {
+    b.classList.toggle('active', b.dataset.connMode === mode);
+  });
+  $id('conn-saved').style.display = mode === 'saved' ? '' : 'none';
+  $id('conn-temp').style.display = mode === 'temp' ? '' : 'none';
+  $id('form-table-options').replaceChildren();
+  formMetadata=null; formRules={}; formRulesValid=false;
+  saveForm();
+}
+document.querySelectorAll('.seg-btn[data-conn-mode]').forEach(b => {
+  b.addEventListener('click', () => switchConnMode(b.dataset.connMode));
+});
+
+function saveForm() {
+  try {
+    const payload = {
+      name: $id('f-name').value, mode: activeMode(), row_count: +$id('f-row-count').value || 1,
+      sql: $id('f-sql').value, script: $id('f-script').value,
+      variables: datagenVariableText(),
+      target_table: $id('f-target-table').value,
+    };
+    if (connMode() === 'saved') {
+      payload.connection_id = $id('f-connection-id').value;
+    } else {
+      const d = dsn();
+      payload.dsn = {host: d.host, port: d.port, user: d.user, database: d.database};
+    }
+    localStorage.setItem(LS_KEY, JSON.stringify(payload));
+  } catch (e) {}
+}
+function loadForm() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (!saved) return;
+    if (saved.name) $id('f-name').value = saved.name;
+    if (saved.dsn) {
+      $id('f-host').value = saved.dsn.host ?? $id('f-host').value;
+      $id('f-port').value = saved.dsn.port ?? $id('f-port').value;
+      $id('f-user').value = saved.dsn.user ?? $id('f-user').value;
+      $id('f-database').value = saved.dsn.database ?? $id('f-database').value;
+    }
+    if (saved.sql) $id('f-sql').value = saved.sql;
+    if (saved.row_count) $id('f-row-count').value = saved.row_count;
+    if (saved.variables) loadDatagenVariables(saved.variables);
+    if (saved.target_table) $id('f-target-table').value = saved.target_table;
+    if (saved.script) $id('f-script').value = saved.script;
+    if (saved.mode === 'shell') switchMode('shell');
+    if (saved.connection_id) {
+      const select = $id('f-connection-id');
+      if ([...select.options].some(o => o.value === saved.connection_id)) {
+        select.value = saved.connection_id;
+        switchConnMode('saved');
+      }
+    }
+  } catch (e) {}
+}
+function switchMode(mode) {
+  document.querySelectorAll('.tab[data-mode]').forEach(t => t.classList.remove('active'));
+  document.querySelector('.tab[data-mode="' + mode + '"]').classList.add('active');
+  $id('panel-sql').style.display = mode === 'sql' ? '' : 'none';
+  $id('panel-form').style.display = mode === 'form' ? '' : 'none';
+  $id('panel-shell').style.display = mode === 'shell' ? '' : 'none';
+  if (mode === 'form') loadFormTableOptions($id('f-form-table').value.trim());
+  saveForm();
+}
+document.querySelectorAll('.tab[data-mode]').forEach(t => t.addEventListener('click', () => switchMode(t.dataset.mode)));
+['f-name','f-connection-id','f-host','f-port','f-user','f-password','f-database','f-sql','f-script','f-row-count']
+  .forEach(id => $id(id).addEventListener('change', saveForm));
+$id('f-target-table').addEventListener('change', saveForm);
+$id('f-sql').addEventListener('input', saveForm);
+datagenRememberEditor($id('f-sql'));
+$id('f-script').addEventListener('input', saveForm);
+$id('btn-add-datagen-variable').addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); datagenVariables.push({id:crypto.randomUUID(),name:'',type:'rand',args:['1','10000']}); renderDatagenVariables(); saveForm(); });
+
+async function readFile(input, target, maxChars) {
+  const file = input.files[0];
+  if (!file) return;
+  const text = await file.text();
+  if (text.length > maxChars) {
+    $id('submit-result').textContent = '✗ 文件超过 ' + maxChars + ' 字符限制';
+    $id('submit-result').className = 'hint err';
+    return;
+  }
+  $id(target).value = text;
+  saveForm();
+}
+$id('f-sql-file').addEventListener('change', e => readFile(e.target, 'f-sql', maxSqlChars));
+$id('f-script-file').addEventListener('change', e => readFile(e.target, 'f-script', maxScriptChars));
+
+$id('btn-example-sql').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/datagen.sql');
+  $id('f-sql').value = await resp.text();
+  saveForm();
+});
+$id('btn-example-shell').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/datagen_shell.sh');
+  $id('f-script').value = await resp.text();
+  saveForm();
+});
+
+async function testConn(url, options, resultId) {
+  const r = $id(resultId);
+  r.textContent = '测试中...'; r.className = 'hint';
+  try {
+    const resp = await fetch(url, options);
+    const data = await resp.json();
+    if (data.ok) { r.textContent = '✓ 连接成功'; r.className = 'hint ok'; }
+    else { r.textContent = '✗ ' + (data.error || '连接失败'); r.className = 'hint err'; }
+  } catch (err) {
+    r.textContent = '✗ ' + err; r.className = 'hint err';
+  }
+}
+$id('btn-test-saved').addEventListener('click', () => {
+  const id = $id('f-connection-id').value;
+  if (!id) {
+    const r = $id('db-test-result');
+    r.textContent = '✗ 请先选择已保存连接'; r.className = 'hint err'; return;
+  }
+  testConn('/api/connections/' + id + '/test', {method: 'POST'}, 'db-test-result');
+});
+$id('btn-test-db').addEventListener('click', () => {
+  testConn('/api/connections/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dsn())}, 'db-test-result-temp');
+});
+
+function datagenConnectionBody() {
+  if (connMode() === 'saved') return {connection_id: $id('f-connection-id').value || null};
+  return {db_dsn: dsn()};
+}
+let formTableLoadTimer = null;
+async function loadFormTableOptions(query='') {
+  const list=$id('form-table-options');
+  try {
+    const body={...datagenConnectionBody(),query};
+    if(!body.connection_id && !body.db_dsn) return;
+    const resp=await fetch('/api/datagen/tables',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await resp.json(); if(!resp.ok) throw Error(data.detail||'读取数据表失败');
+    list.replaceChildren(...data.tables.map(name=>{const option=document.createElement('option');option.value=name;return option;}));
+  } catch(e) {
+    list.replaceChildren();
+    const hint=$id('form-metadata-result');hint.textContent='✗ '+e.message;hint.className='hint err';
+  }
+}
+$id('f-form-table').addEventListener('focus',()=>loadFormTableOptions($id('f-form-table').value.trim()));
+$id('f-form-table').addEventListener('input',()=>{clearTimeout(formTableLoadTimer);formTableLoadTimer=setTimeout(()=>loadFormTableOptions($id('f-form-table').value.trim()),250);});
+$id('f-connection-id').addEventListener('change',()=>{formMetadata=null;formRules={};formRulesValid=false;$id('form-table-options').replaceChildren();if(activeMode()==='form')loadFormTableOptions();});
+function renderMetadata(metadata, errors) {
+  datagenMetadata = metadata;
+  const list = $id('metadata-field-list');
+  list.replaceChildren();
+  (metadata.columns || []).forEach(col => {
+    const tr = document.createElement('tr');
+    const limit = [col.column_type, col.max_length ? '长度≤' + col.max_length : '', col.numeric_precision ? `精度 ${col.numeric_precision}/${col.numeric_scale ?? 0}` : '', col.default !== null ? '默认值' : '', col.extra || ''].filter(Boolean).join(' · ');
+    const unique = col.key === 'PRI' ? '主键' : (col.key === 'UNI' ? '唯一' : '-');
+    const source = col.sensitive ? '敏感列，需显式确认' : '数据库元数据';
+    [col.name, limit, unique, col.nullable ? '允许' : 'NOT NULL', source].forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); });
+    list.append(tr);
+  });
+  if (errors && errors.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5; td.className = 'field-error';
+    td.textContent = errors.map(e => `${e.column || '-'}：${e.message}`).join('\n');
+    tr.append(td); list.prepend(tr);
+  }
+}
+async function refreshMetadata(validateOnly=false) {
+  const hint = $id('metadata-result');
+  const table = $id('f-target-table').value.trim();
+  if (!table) { hint.textContent = '✗ 请先填写目标表'; hint.className = 'hint err'; return; }
+  const body = {...datagenConnectionBody(), table};
+  if (!body.connection_id && !body.db_dsn) { hint.textContent = '✗ 请先选择数据库连接'; hint.className = 'hint err'; return; }
+  hint.textContent = validateOnly ? '校验中...' : '读取中...'; hint.className = 'hint';
+  try {
+    let url = '/api/datagen/metadata';
+    if (validateOnly) {
+      url = '/api/datagen/rules/validate';
+      body.row_count = +$id('f-row-count').value || 1;
+      body.rules = (datagenMetadata?.columns || []).map(col => ({column: col.name, nullable: col.nullable, unique: col.key === 'PRI' || col.key === 'UNI', length: {max: col.max_length}}));
+    }
+    const resp = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const data = await resp.json();
+    if (!resp.ok) throw Error(data.detail || '请求失败');
+    renderMetadata(validateOnly ? data.metadata : data, validateOnly ? data.errors : []);
+    hint.textContent = validateOnly && data.errors.length ? `✗ ${data.errors.length} 个规则问题` : '✓ 已应用数据库限制';
+    hint.className = validateOnly && data.errors.length ? 'hint err' : 'hint ok';
+  } catch (err) {
+    hint.textContent = '✗ ' + err.message; hint.className = 'hint err';
+  }
+}
+$id('btn-refresh-metadata').addEventListener('click', () => refreshMetadata(false));
+$id('btn-validate-rules').addEventListener('click', () => refreshMetadata(true));
+
+function defaultFormRule(col) {
+  const type=String(col.data_type || col.column_type || '').toLowerCase();
+  let generator='randstr', params={max_length:Math.min(Number(col.max_length)||16,255)};
+  if(col.enum_values?.length) { generator='pick'; params={values:[...col.enum_values]}; }
+  else if(/tinyint|smallint|mediumint|\bint\b|integer|bigint/.test(type)) { generator='rand'; params={min:1,max:100000}; }
+  else if(/decimal|numeric|float|double/.test(type)) { generator='randf'; params={min:0,max:1000,digits:Number(col.numeric_scale)||2}; }
+  else if(/datetime|timestamp/.test(type)) { generator='randdt'; params={start:'2026-01-01 00:00:00',end:'2026-12-31 23:59:59'}; }
+  else if(/^date$/.test(type)) { generator='randdate'; params={start:'2026-01-01',end:'2026-12-31'}; }
+  if(/auto_increment|generated/i.test(col.extra || '') || (col.default !== null && col.default !== undefined)) generator='omit';
+  return {column:col.name,generator,params,null_ratio:0,sample_ratio:100,status:'unapplied'};
+}
+function formParamInputs(rule, rerender) {
+  const box=document.createElement('div'); box.className='parameter-grid'; const p=rule.params || (rule.params={});
+  const add=(key,label,type='text')=>{const input=document.createElement('input');input.type=type;input.placeholder=label;input.value=Array.isArray(p[key])?p[key].join(','):p[key]??'';input.addEventListener('input',()=>{p[key]=Array.isArray(p[key])?input.value.split(',').map(x=>x.trim()).filter(Boolean):input.value;rule.status='unapplied';formRulesValid=false;});box.append(input);};
+  const base=rule.generator==='sample'?(rule.base_generator||'rand'):rule.generator;
+  if(base==='rand'){add('min','最小值','number');add('max','最大值','number');}
+  else if(base==='randf'){add('min','最小值','number');add('max','最大值','number');add('digits','小数位','number');}
+  else if(base==='randstr') add('max_length','最大长度','number');
+  else if(base==='pick') add('values','候选值，逗号分隔');
+  else if(base==='randdate'||base==='randdt'){add('start','开始');add('end','结束');}
+  else if(base==='derived'){const input=document.createElement('input');input.value=rule.derived_expression||'';input.readOnly=true;input.title='由数据库 CHECK 约束计算';box.append(input);}
+  return box;
+}
+function renderFormFields(metadata, keepRules=false) {
+  formMetadata=metadata; const list=$id('form-field-list'); list.replaceChildren();
+  const foreignColumns=new Set((metadata.foreign_keys||[]).map(fk=>fk.COLUMN_NAME));
+  const uniqueColumns=new Set((metadata.unique_indexes||[]).filter(index=>index.columns?.length===1).map(index=>index.columns[0]).filter(column=>!foreignColumns.has(column)));
+  (metadata.columns||[]).forEach(col=>{
+    const existing=keepRules&&formRules[col.name]; const rule=existing||defaultFormRule(col); formRules[col.name]=rule;
+    const tr=document.createElement('tr');
+    const mode=document.createElement('select');
+    [['rand','随机整数'],['randf','随机小数'],['randstr','随机字符串'],['pick','枚举'],['randdate','随机日期'],['randdt','随机日期时间'],['sample','已有数据抽样'],['derived','数据库计算规则'],['omit','跳过']].forEach(([v,t])=>{const option=new Option(t,v);if(v==='sample'&&(uniqueColumns.has(col.name)||col.key==='PRI'||col.key==='UNI')){option.disabled=true;option.textContent='已有数据抽样（唯一字段不可用）';}if(v==='derived')option.disabled=rule.generator!=='derived';mode.add(option);});
+    mode.value=rule.generator; mode.addEventListener('change',()=>{const previous=rule.generator;rule.generator=mode.value;if(mode.value==='sample'){rule.base_generator=previous==='sample'?(rule.base_generator||'rand'):previous;}rule.status='unapplied';formRulesValid=false;renderFormFields(formMetadata,true);});
+    const ratio=document.createElement('input');ratio.type='number';ratio.min=0;ratio.max=100;ratio.value=rule.sample_ratio??100;ratio.disabled=rule.generator!=='sample';ratio.addEventListener('input',()=>{rule.sample_ratio=Number(ratio.value);rule.status='unapplied';formRulesValid=false;});
+    const status=document.createElement('span');status.className=rule.status==='adjusted'?'badge badge-running':'hint';status.textContent={adjusted:'已调整',passed:'已通过',unapplied:'未应用'}[rule.status]||rule.status;
+    const values=[col.name,[col.column_type,col.max_length?'长度≤'+col.max_length:'',col.nullable?'可空':'NOT NULL'].filter(Boolean).join(' · ')];values.forEach(text=>{const td=document.createElement('td');td.textContent=text;tr.append(td);});
+    const modeCell=document.createElement('td');modeCell.append(mode);const paramsCell=document.createElement('td');paramsCell.append(formParamInputs(rule));const ratioCell=document.createElement('td');ratioCell.append(ratio);const statusCell=document.createElement('td');statusCell.append(status);tr.append(modeCell,paramsCell,ratioCell,statusCell);list.append(tr);
+  });
+}
+async function loadFormTable() {
+  const hint=$id('form-metadata-result'), table=$id('f-form-table').value.trim();
+  if (!table) { hint.textContent='✗ 请先填写目标表'; hint.className='hint err'; return; }
+  hint.textContent='读取中...';
+  try {
+    const resp=await fetch('/api/datagen/metadata',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...datagenConnectionBody(),table})});
+    const data=await resp.json(); if(!resp.ok) throw Error(data.detail || '读取失败');
+    formRules={}; formRulesValid=false; renderFormFields(data); $id('btn-apply-form-rules').disabled=false; hint.textContent=`✓ 已读取 ${data.columns.length} 个字段，请配置后应用数据库规则`; hint.className='hint ok';
+  } catch(e) { hint.textContent='✗ '+e.message; hint.className='hint err'; }
+}
+async function applyFormRules() {
+  const hint=$id('form-metadata-result'), table=$id('f-form-table').value.trim(); hint.textContent='正在应用数据库规则...';hint.className='hint';
+  try {
+    const body={...datagenConnectionBody(),table,row_count:+$id('f-form-row-count').value||1,rules:Object.values(formRules)};
+    const resp=await fetch('/api/datagen/rules/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await resp.json();if(!resp.ok)throw Error(data.detail||'应用失败');
+    formRules=Object.fromEntries(data.rules.map(rule=>[rule.column,rule]));formRulesValid=data.ok;renderFormFields(data.metadata,true);
+    const summary=data.changes.map(x=>`${x.column}：${JSON.stringify(x.before)} → ${JSON.stringify(x.after)}（${x.reason}）`).join('；');
+    hint.textContent=(data.ok?'✓ ':'✗ ')+`调整 ${data.changes.length} 项`+(summary?'：'+summary:'')+(data.errors.length?'；错误：'+data.errors.map(x=>x.column+' '+x.message).join('；'):'');hint.className=data.ok?'hint ok':'hint err';
+  } catch(e){hint.textContent='✗ '+e.message;hint.className='hint err';}
+}
+function formRuleExpression(rule,col) {
+  const p=rule.params||{}; let base=rule.generator==='sample'?(rule.base_generator||defaultFormRule(col).generator):rule.generator;
+  let expr;
+  if(base==='rand') expr=`rand(${Number(p.min)},${Number(p.max)})`;
+  else if(base==='randf') expr=`randf(${Number(p.min)},${Number(p.max)},${Number(p.digits)})`;
+  else if(base==='randstr') expr=`randstr(${Number(p.max_length)})`;
+  else if(base==='pick') expr=`pick(${(p.values||[]).map(datagenLiteral).join(',')})`;
+  else if(base==='randdate'||base==='randdt') expr=`${base}(${datagenLiteral(p.start)},${datagenLiteral(p.end)})`;
+  else throw Error(`${col.name} 没有可用生成规则`);
+  if(rule.generator!=='sample') return expr;
+  const source=rule.sample_source||{table:formMetadata.table,column:col.name};return `sample(${datagenLiteral(source.table)},${datagenLiteral(source.column)},{'sample_ratio':${Number(rule.sample_ratio)},'random':${datagenLiteral(expr)}})`;
+}
+function buildFormSql() {
+  if (!formMetadata) throw Error('请先读取目标表结构');
+  if (!formRulesValid) throw Error('数据库规则尚未通过，请应用规则并处理错误后再提交');
+  const pending=Object.values(formRules).filter(rule=>rule.status==='unapplied');
+  if(pending.length) throw Error('请先点击“应用数据库规则”更新并确认字段规则');
+  const table=$id('f-form-table').value.trim(), columns=[], values=[]; formVariables={};
+  const columnsByName=Object.fromEntries((formMetadata.columns||[]).map(col=>[col.name,col]));
+  const placeholder=name=>'\u007b\u007bvar('+datagenLiteral(name)+')\u007d\u007d';
+  const variableName=column=>'_f_'+column;
+  (formMetadata.columns || []).forEach(col => {
+    if (/auto_increment|generated/i.test(col.extra || '') || (col.default !== null && col.default !== undefined && col.default !== '')) return;
+    const rule=formRules[col.name]||defaultFormRule(col); if(rule.generator==='omit') return;
+    columns.push('`'+col.name+'`');
+    if(rule.generator!=='derived') {
+      const name=variableName(col.name);formVariables[name]=formRuleExpression(rule,col);values.push(placeholder(name));return;
+    }
+    let expression=rule.derived_expression||'';
+    (rule.dependencies||[]).forEach(dependency=>{
+      const dependencyRule=formRules[dependency];const dependencyColumn=columnsByName[dependency];let replacement;
+      if(dependencyRule&&dependencyRule.generator!=='omit') {
+        const name=variableName(dependency);if(!formVariables[name])formVariables[name]=formRuleExpression(dependencyRule,dependencyColumn);replacement=placeholder(name);
+      } else if(dependencyColumn&&dependencyColumn.default!==null&&dependencyColumn.default!==undefined) {
+        replacement=Number.isFinite(Number(dependencyColumn.default))?String(dependencyColumn.default):datagenLiteral(dependencyColumn.default);
+      } else throw Error(`${col.name} 的计算依赖 ${dependency} 没有生成规则或默认值`);
+      expression=expression.replace(new RegExp('\\b'+dependency+'\\b','g'),replacement);
+    });
+    values.push('('+expression+')');
+  });
+  if(!columns.length) throw Error('至少选择一个字段');
+  return 'INSERT INTO `' + table + '` (' + columns.join(', ') + ') VALUES (' + values.join(', ') + ');';
+}
+$id('btn-load-form-table').addEventListener('click', loadFormTable);
+$id('btn-apply-form-rules').addEventListener('click', applyFormRules);
+
+$id('datagen-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const hint = $id('submit-result');
+  const mode = activeMode();
+  let content = mode === 'sql' ? $id('f-sql').value.trim() : mode === 'form' ? '' : $id('f-script').value.trim();
+  if (mode === 'form') { try { content = buildFormSql(); } catch (err) { hint.textContent='✗ '+err.message; hint.className='hint err'; return; } }
+  if (!content) {
+    hint.textContent = '✗ 造数内容为空'; hint.className = 'hint err'; return;
+  }
+  if (mode === 'shell' && !scriptEnabled) {
+    hint.textContent = '✗ Shell 造数开关未开启'; hint.className = 'hint err'; return;
+  }
+  if (mode === 'shell' && !confirm('Shell 脚本会在目标侧以子进程执行，确认继续？')) return;
+  const body = {
+    name: $id('f-name').value, mode: mode === 'form' ? 'sql' : mode, source: 'paste',
+    content: content,
+    row_count: mode === 'sql' ? (+$id('f-row-count').value || 1) : mode === 'form' ? (+$id('f-form-row-count').value || 1) : 1,
+  };
+  if (mode === 'form') {
+    body.target_table = $id('f-form-table').value.trim();
+    body.field_rules = Object.values(formRules);
+    body.variables = formVariables;
+  }
+  if (mode === 'sql') {
+    try { body.variables = datagenVariableText(); }
+    catch (err) { hint.textContent = '✗ ' + err.message; hint.className = 'hint err'; return; }
+  } else if (mode !== 'form') {
+    body.variables = {};
+  }
+  if (connMode() === 'saved') {
+    const connectionId = $id('f-connection-id').value;
+    if (!connectionId) {
+      hint.textContent = '✗ 请先选择已保存连接，或切换到临时连接'; hint.className = 'hint err'; return;
+    }
+    body.connection_id = connectionId;
+  } else {
+    body.db_dsn = dsn();
+  }
+  saveForm();
+  $id('btn-submit').disabled = true; hint.textContent = '提交中...'; hint.className = 'hint';
+  try {
+    const resp = await fetch('/api/datagen/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await resp.json();
+    if (resp.ok) {
+      hint.textContent = '✓ 已创建造数任务 ' + data.job_id;
+      hint.className = 'hint ok';
+      setTimeout(() => location.reload(), 1200);
+    } else {
+      hint.textContent = '✗ ' + (data.detail || '提交失败'); hint.className = 'hint err';
+      $id('btn-submit').disabled = false;
+    }
+  } catch (err) {
+    hint.textContent = '✗ ' + err; hint.className = 'hint err'; $id('btn-submit').disabled = false;
+  }
+});
+
+document.querySelectorAll('.stop-job').forEach(a => a.addEventListener('click', async (e) => {
+  e.preventDefault();
+  await fetch('/api/datagen/jobs/' + a.dataset.id + '/stop', {method: 'POST'});
+  location.reload();
+}));
+
+renderDatagenVariables();
+loadForm();
+</script>
+{% endblock %}

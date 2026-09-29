@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
-from fastapi.templating import Jinja2Templates
-from pathlib import Path
 
 from app import db
+from app.auth import get_current_user
 from app.config import settings
+from app.services import connection_manager
+from app.templating import templates
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 
 @router.get("/")
@@ -21,10 +21,16 @@ def new_run_page(request: Request):
         "host": settings.target_db_host,
         "port": settings.target_db_port,
         "user": settings.target_db_user,
-        "password": settings.target_db_password,
+        "password": "",
         "database": settings.target_db_name,
     }
-    return templates.TemplateResponse(request, "new_run.html", {"default_dsn": default_dsn})
+    user_id = connection_manager.current_user_id(get_current_user(request))
+    connections = [connection_manager.to_public_connection(c) for c in db.list_connections(user_id)]
+    return templates.TemplateResponse(
+        request,
+        "new_run.html",
+        {"default_dsn": default_dsn, "connections": connections},
+    )
 
 
 @router.get("/runs")

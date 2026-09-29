@@ -20,6 +20,7 @@
         <td class="ops">
           <a href="/runs/{{ r.id }}/monitor">监控</a>
           {% if r.status in ('finished', 'failed', 'cancelled') %}
+            <a href="/runs/{{ r.id }}/explain" title="压测结束后采集的执行计划">执行计划</a>
             <a href="/runs/{{ r.id }}/report">报告</a>
           {% endif %}
           {% if r.has_report %}

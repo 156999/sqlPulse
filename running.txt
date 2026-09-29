@@ -1,1 +1,1 @@
-D:\anaconda\envs\sqlpulse\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+D:\sqlpulse\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8080

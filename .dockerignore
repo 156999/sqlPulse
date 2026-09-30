@@ -5,6 +5,9 @@ reports/
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+.coverage.*
+test-results/
 .git/
 docs/
 tests/

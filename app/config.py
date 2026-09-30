@@ -33,6 +33,35 @@ class Settings(BaseSettings):
     explain_max_statements: int = 50      # 单轮最多发多少条 EXPLAIN
     explain_budget_sec: float = 15.0      # 单轮采集总时间上限
 
+    # ---- L1 硬规则报告阈值（见 sqlpulse/docs/l1_report_design.md §11）----
+    # 平铺 + l1_ 前缀：.env 里直接写 L1_P99_MS=120 即可覆盖，单测也能用
+    # Settings(l1_p99_ms=...) 注入。默认值待真实压测校准后固化。
+    l1_p99_ms: float = 100.0
+    l1_p99_severe_ms: float = 500.0
+    l1_p95_ms: float = 50.0
+    l1_tail_ratio: float = 10.0
+    l1_sql_avg_ms: float = 50.0
+    l1_sql_p99_ms: float = 500.0
+    l1_err_rate: float = 0.01
+    l1_err_rate_warn: float = 0.001
+    l1_fail_share: float = 0.8
+    l1_qps_factor: float = 0.5
+    l1_plateau_slope: float = 0.05
+    l1_cv: float = 0.5
+    l1_duration_ratio: float = 0.8
+    l1_min_requests: int = 1000
+    l1_slow_total: float = 0.0
+    l1_lock_total: float = 0.0
+    l1_lock_rate: float = 10.0
+    l1_tmp_total: float = 0.0
+    l1_bufpool_hit: float = 0.95
+    l1_bufpool_hit_bad: float = 0.90
+    l1_conn_ratio: float = 0.8
+    l1_tr_factor: float = 1.0
+    l1_qps_amp: float = 3.0
+    l1_min_points: int = 3
+    l1_max_rows: int = 10000
+
     auth_enabled: bool = True
     app_secret_key: str = ""
     auth_session_ttl_seconds: int = 604800

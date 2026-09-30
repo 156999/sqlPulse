@@ -9,7 +9,6 @@ from loguru import logger
 
 from app import db
 from app.config import settings
-from app.services.rule_engine import evaluate
 from app.services.runner import parse_sql_tasks
 
 
@@ -37,11 +36,17 @@ def read_stats(run_id: str) -> tuple:
 
 
 def percentile(values: list, pct: float) -> Optional[float]:
+    """线性插值分位。round() 取整在样本少时会明显偏移，
+    L1 的 threads_running_p95 直接依赖它。"""
     vs = sorted(v for v in values if v is not None)
     if not vs:
         return None
-    idx = min(len(vs) - 1, max(0, round(pct * (len(vs) - 1))))
-    return vs[idx]
+    if len(vs) == 1:
+        return vs[0]
+    pos = pct * (len(vs) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(vs) - 1)
+    return vs[lo] + (vs[hi] - vs[lo]) * (pos - lo)
 
 
 def query_max_connections(dsn: dict) -> Optional[int]:
@@ -92,7 +97,22 @@ def build_l0(run: dict) -> dict:
     per_sql.sort(key=lambda x: -(x["avg_ms"] or 0))
 
     def col_sum(key):
-        return sum(m[key] for m in metrics if m.get(key) is not None) or None
+        """返回 (合计, 是否有数据)。"真实为 0"（健康证据）与"没采到"
+        （无法判断）必须区分 —— L1 的 B 层规则依赖这个区分。"""
+        vals = [m[key] for m in metrics if m.get(key) is not None]
+        return (sum(vals), True) if vals else (None, False)
+
+    def col_max(key):
+        vals = [m[key] for m in metrics if m.get(key) is not None]
+        return max(vals) if vals else None
+
+    def col_avg(key):
+        vals = [m[key] for m in metrics if m.get(key) is not None]
+        return (sum(vals) / len(vals)) if vals else None
+
+    slow_total, slow_present = col_sum("slow_inc")
+    lock_total, lock_present = col_sum("lock_waits_inc")
+    tmp_total, tmp_present = col_sum("tmp_disk_inc")
 
     started = run.get("started_at")
     ended = run.get("ended_at")
@@ -122,8 +142,17 @@ def build_l0(run: dict) -> dict:
         "qps_peak": max(qps_values) if qps_values else None,
         "err_rate": None,
         "threads_running_p95": percentile(tr_values, 0.95),
-        "mysql_slow_total": col_sum("slow_inc"),
-        "mysql_lock_waits_total": col_sum("lock_waits_inc"),
+        "mysql_slow_total": slow_total,
+        "mysql_slow_present": slow_present,
+        "mysql_lock_waits_total": lock_total,
+        "mysql_lock_waits_present": lock_present,
+        "tmp_disk_total": tmp_total,
+        "tmp_disk_present": tmp_present,
+        "lock_waits_rate_max": col_max("lock_waits_inc"),
+        "mysql_qps_avg": col_avg("mysql_qps"),
+        "threads_connected_max": col_max("threads_connected"),
+        "bufpool_hit_last": metrics[-1]["bufpool_hit"] if metrics else None,
+        "metrics_points": len(metrics),
         "per_sql": per_sql,
     }
     if l0["total_requests"]:
@@ -131,54 +160,11 @@ def build_l0(run: dict) -> dict:
     return l0
 
 
-def render_markdown(run: dict, l0: dict, l1: list) -> str:
-    def fmt(v, suffix=""):
-        return f"{v:.1f}{suffix}" if isinstance(v, (int, float)) else "-"
-
-    lines = [f"# 压测报告 {run['id']}", ""]
-    lines += ["## 任务参数", "",
-              f"- 任务名：{run['name']}",
-              f"- 状态：{run['status']}",
-              f"- 并发数：{run['concurrency']}（spawn {run['spawn_rate']}/s）",
-              f"- 计划时长：{run['duration_sec']}s（实际 {l0.get('actual_duration_sec') or '-'}s）",
-              f"- 开始时间：{run.get('started_at') or '-'}",
-              f"- 结束时间：{run.get('ended_at') or '-'}",
-              ""]
-    if run.get("error_msg"):
-        lines += [f"> 错误信息：{run['error_msg']}", ""]
-
-    err_rate_str = f"{l0['err_rate']:.2%}" if l0["err_rate"] is not None else "-"
-    lines += ["## L0 指标总览", "",
-              "| 指标 | 数值 |", "|---|---|",
-              f"| 总请求数 | {l0['total_requests']} |",
-              f"| 总失败数 | {l0['total_failures']} |",
-              f"| 错误率 | {err_rate_str} |"]
-    lines += [f"| QPS 均值 / 峰值 | {fmt(l0['qps_avg'])} / {fmt(l0['qps_peak'])} |",
-              f"| 平均延迟 | {fmt(l0['avg_ms'], 'ms')} |",
-              f"| P50 / P95 / P99 | {fmt(l0['p50_ms'], 'ms')} / {fmt(l0['p95_ms'], 'ms')} / {fmt(l0['p99_ms'], 'ms')} |",
-              f"| 最大延迟 | {fmt(l0['max_ms'], 'ms')} |",
-              f"| Threads_running P95 | {l0['threads_running_p95'] if l0['threads_running_p95'] is not None else '-'} |",
-              f"| MySQL 慢查询（增量） | {l0['mysql_slow_total'] if l0['mysql_slow_total'] is not None else '-'} 条 |",
-              f"| MySQL 行锁等待（增量） | {l0['mysql_lock_waits_total'] if l0['mysql_lock_waits_total'] is not None else '-'} 次 |",
-              ""]
-
-    lines += ["## 分语句统计", "", "| 语句 | 内容 | 请求数 | 失败数 | 平均 | P95 | P99 | 最大 | QPS |",
-              "|---|---|---|---|---|---|---|---|---|"]
-    for s in l0["per_sql"]:
-        lines.append(
-            f"| {s['sql_id']} | {s.get('sql', '')} | {s['requests']} | {s['failures']} | {fmt(s['avg_ms'], 'ms')} | "
-            f"{fmt(s['p95_ms'], 'ms')} | {fmt(s['p99_ms'], 'ms')} | {fmt(s['max_ms'], 'ms')} | {fmt(s['qps'])} |"
-        )
-    lines.append("")
-
-    lines += ["## L1 规则建议（本地规则报告，未配置 LLM）", ""]
-    if l1:
-        for a in l1:
-            lines.append(f"- **[{a['level'].upper()}] {a['title']}**：{a['detail']}")
-    else:
-        lines.append("- 无命中规则，各项指标在阈值内。")
-    lines += ["", "---", "*SQL Pulse MVP · L2 LLM 诊断段落（预留）*"]
-    return "\n".join(lines) + "\n"
+def render_markdown(run: dict, l0: dict, l1) -> str:
+    """完整报告 Markdown。L0 段落 + L1 诊断统一由 l1/render 渲染，
+    旧 list 形状的 l1（历史数据）会被 normalize 成兼容视图。"""
+    from app.services.l1 import render as l1_render
+    return l1_render.render_markdown(run, l0, l1)
 
 
 def generate_report(run_id: str) -> Optional[dict]:
@@ -189,22 +175,36 @@ def generate_report(run_id: str) -> Optional[dict]:
     dsn = json.loads(run["db_dsn_json"])
     max_conn = query_max_connections(dsn)
 
-    slowest = l0["per_sql"][0] if l0["per_sql"] else {}
-    metrics_in = {
-        **l0,
-        "slowest_sql_avg_ms": slowest.get("avg_ms"),
-        "slowest_sql_id": slowest.get("sql_id", "-"),
-        "max_connections": max_conn,
-    }
-    l1 = evaluate(metrics_in)
+    from app.services import explain_probe
+    from app.services.collector import read_per_sql_history
+    from app.services.l1 import build as l1_build
+    from app.services.l1 import evidence as l1_evidence
+    from app.services.l1 import render as l1_render
+    from app.services.l1.thresholds import Thresholds
+
+    plan_artifact = explain_probe.load_artifact(run_id)
+    series = read_per_sql_history(
+        settings.data_dir / "locust" / f"{run_id}_stats_history.csv")
+    th = Thresholds.from_settings(settings)
+
+    inp = l1_evidence.collect(
+        run=run, l0=l0, series=series, plan_artifact=plan_artifact,
+        target={"max_connections": max_conn,
+                "server_version": (plan_artifact or {}).get("server_version")},
+    )
+    l1_report = l1_build(inp, th)
+    l1_dict = l1_report.to_json()
 
     out_dir = settings.reports_dir / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    md = render_markdown(run, l0, l1)
+    md = l1_render.render_markdown(run, l0, l1_dict)
     md_path = out_dir / "report.md"
     md_path.write_text(md, encoding="utf-8")
-    (out_dir / "metrics.json").write_text(json.dumps(l0, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "metrics.json").write_text(
+        json.dumps({"l0": l0, "l1": l1_dict}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
 
-    db.save_report(run_id, l0, l1, str(md_path))
-    logger.info("report generated for {}: {} suggestions", run_id, len(l1))
+    db.save_report(run_id, l0, l1_dict, str(md_path))
+    logger.info("report generated for {}: verdict={}, {} findings",
+                run_id, l1_report.verdict.get("level"), len(l1_report.findings))
     return db.get_report(run_id)

@@ -251,6 +251,118 @@ class TestExecuteSqlJob:
         assert inserted == [("INSERT INTO t(code) VALUES (%s)", (2,))]
         assert "unique conflict index=uk_code candidate=(1,) source=database retry=1/20" in log_path.read_text(encoding="utf-8")
 
+    def test_compound_unique_sample_conflict_uses_available_cached_combination(self, tmp_path, monkeypatch):
+        inserted = []
+
+        class Cursor:
+            rowcount = -1
+            selected = None
+
+            def execute(self, stmt, args=None):
+                if stmt.startswith("SELECT `id` FROM `orders`"):
+                    self.selected = [(1,)]
+                    return
+                if stmt.startswith("SELECT `id` FROM `skus`"):
+                    self.selected = [(2,), (3,)]
+                    return
+                if stmt.startswith("SELECT 1 FROM `items`"):
+                    self.selected = (1,) if args == (1, 2) else None
+                    return
+                inserted.append((stmt, args))
+                self.rowcount = 1
+
+            def fetchone(self):
+                return self.selected
+
+            def fetchall(self):
+                return self.selected
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class Connection:
+            def cursor(self):
+                return Cursor()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.services.sql_params.random.choice", lambda rows: rows[0])
+        monkeypatch.setattr("app.services.sql_executor.random.shuffle", lambda values: None)
+        log_path = tmp_path / "compound-unique-retry.log"
+        status, rows, error = execute_sql_job(
+            "compound-unique-job",
+            {"host": "h", "port": 3306, "user": "u", "password": "p", "database": "d"},
+            [compile_statement(
+                "INSERT INTO items(order_id,sku_id) "
+                "VALUES ({{sample('orders','id')}},{{sample('skus','id')}})"
+            )],
+            log_path, threading.Event(), 30, connect=lambda **kwargs: Connection(),
+            target_table="items", unique_indexes=[{"name": "uk_order_sku", "columns": ["order_id", "sku_id"]}],
+        )
+        assert status == "finished" and rows == 1 and error is None
+        assert inserted == [("INSERT INTO items(order_id,sku_id) VALUES (%s,%s)", (1, 3))]
+
+    def test_compound_unique_sample_conflict_reports_exhausted_space(self, tmp_path, monkeypatch):
+        inserted = []
+
+        class Cursor:
+            rowcount = -1
+            selected = None
+
+            def execute(self, stmt, args=None):
+                if stmt.startswith("SELECT `id` FROM `orders`"):
+                    self.selected = [(1,), (2,)]
+                    return
+                if stmt.startswith("SELECT `id` FROM `skus`"):
+                    self.selected = [(1,), (2,), (3,)]
+                    return
+                if stmt.startswith("SELECT 1 FROM `items`"):
+                    self.selected = (1,)
+                    return
+                inserted.append((stmt, args))
+                self.rowcount = 1
+
+            def fetchone(self):
+                return self.selected
+
+            def fetchall(self):
+                return self.selected
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class Connection:
+            def cursor(self):
+                return Cursor()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.services.sql_params.random.choice", lambda rows: rows[0])
+        monkeypatch.setattr("app.services.sql_executor.random.shuffle", lambda values: None)
+        log_path = tmp_path / "compound-unique-exhausted.log"
+        status, rows, error = execute_sql_job(
+            "compound-unique-job",
+            {"host": "h", "port": 3306, "user": "u", "password": "p", "database": "d"},
+            [compile_statement(
+                "INSERT INTO items(order_id,sku_id) "
+                "VALUES ({{sample('orders','id')}},{{sample('skus','id')}})"
+            )],
+            log_path, threading.Event(), 30, connect=lambda **kwargs: Connection(),
+            target_table="items", unique_indexes=[{"name": "uk_order_sku", "columns": ["order_id", "sku_id"]}],
+        )
+        assert status == "failed" and rows == 0
+        assert "sample 候选组合已全部冲突" in error
+        assert inserted == []
+        assert "sample combination space exhausted probed=6" in log_path.read_text(encoding="utf-8")
+
     def test_empty_input_does_not_connect(self, tmp_path):
         def connect(**kwargs):
             raise AssertionError("should not connect")

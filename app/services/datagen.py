@@ -10,6 +10,8 @@ from app.services.runner import now_iso
 from app.services.script_runner import run_script_job
 from app.services.sql_executor import execute_sql_job, split_sql_statements
 from app.services.sql_params import compile_statement, compile_variables
+from app.services.datagen_dependencies import build_dependency_plan, build_parent_insert
+from app.services.datagen_rules import read_table_metadata
 
 
 class DataGenExecutor:
@@ -79,18 +81,56 @@ class DataGenExecutor:
                 statements = split_sql_statements(content)
                 definitions = compile_variables(payload.get("variables") or {})
                 compiled = [compile_statement(stmt, definitions, f"造数 SQL 第 {i} 条") for i, stmt in enumerate(statements, 1)]
-                status, rows, error = execute_sql_job(
-                    job_id,
-                    dsn,
-                    compiled,
-                    log_path,
-                    event,
-                    settings.datagen_sql_timeout_sec,
-                    row_count=int(payload.get("row_count") or 1),
-                    variable_definitions=definitions,
-                    target_table=payload.get("target_table"),
-                    unique_indexes=payload.get("unique_indexes") or [],
-                )
+                dependency_strategy = payload.get("dependency_strategy", "target_only")
+                dependency_plan = payload.get("dependency_plan") or {}
+                if dependency_strategy != "target_only":
+                    if not payload.get("confirm_dependency_writes"):
+                        raise ValueError("自动补充依赖表必须先确认依赖表写入")
+                    if not payload.get("target_table"):
+                        raise ValueError("自动补充依赖表需要目标表")
+                    dependency_plan = build_dependency_plan(dsn, payload["target_table"], int(payload.get("row_count") or 1), dependency_strategy)
+                    if dependency_plan.get("warnings") and not dependency_plan.get("execution_order"):
+                        raise ValueError("依赖计划不可执行：" + "；".join(dependency_plan["warnings"]))
+                    dependency_items = dependency_plan.get("dependencies") or []
+                    order_index = {table: index for index, table in enumerate(dependency_plan.get("execution_order") or [])}
+                    dependency_items = sorted(dependency_items, key=lambda item: order_index.get(item["table"], 0))
+                    for item in dependency_items:
+                        rows = int(item.get("planned_rows") or 0)
+                        if rows <= 0:
+                            continue
+                        table = item["table"]
+                        logger.info("[execute] generating dependency table {} rows={}", table, rows)
+                        metadata = read_table_metadata(dsn, table)
+                        parent_sql = build_parent_insert(metadata)
+                        parent_compiled = [compile_statement(parent_sql, {}, f"依赖表 {table}")]
+                        parent_status, parent_rows, parent_error = execute_sql_job(
+                            job_id, dsn, parent_compiled, log_path, event,
+                            settings.datagen_sql_timeout_sec, row_count=rows,
+                            variable_definitions={}, target_table=table,
+                            unique_indexes=metadata.get("unique_indexes") or [],
+                        )
+                        logger.info("[execute] finished dependency table {} affected={}", table, parent_rows)
+                        if parent_status != "finished":
+                            status, rows, error = parent_status, parent_rows, parent_error
+                            break
+                    else:
+                        status, rows, error = execute_sql_job(
+                            job_id, dsn, compiled, log_path, event,
+                            settings.datagen_sql_timeout_sec,
+                            row_count=int(payload.get("row_count") or 1),
+                            variable_definitions=definitions,
+                            target_table=payload.get("target_table"),
+                            unique_indexes=payload.get("unique_indexes") or [],
+                        )
+                else:
+                    status, rows, error = execute_sql_job(
+                        job_id, dsn, compiled, log_path, event,
+                        settings.datagen_sql_timeout_sec,
+                        row_count=int(payload.get("row_count") or 1),
+                        variable_definitions=definitions,
+                        target_table=payload.get("target_table"),
+                        unique_indexes=payload.get("unique_indexes") or [],
+                    )
             else:
                 status, rows, error = run_script_job(
                     job_id,

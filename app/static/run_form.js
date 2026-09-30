@@ -6,6 +6,10 @@ const RunForm = (() => {
   const defaults = {rand:['1','10000'], randf:['0','100','2'], randstr:['16'], randdate:['2026-01-01','2026-12-31'], randdt:['2026-01-01 00:00:00','2026-12-31 23:59:59'], uuid:[], pick:[], pickw:[]};
   const labels = {rand:['最小值','最大值'], randf:['最小值','最大值','小数位'], randstr:['长度'], randdate:['开始日期','结束日期'], randdt:['开始时间','结束时间'], uuid:[]};
   const clone = x => JSON.parse(JSON.stringify(x));
+  function clientId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+    return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
   function numeric(value, integer=false) {
     const text = String(value).trim();
     const pattern = integer ? /^-?\d+$/ : /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
@@ -59,15 +63,15 @@ const RunForm = (() => {
     const additions=imported.map(g=>({...clone(g),id:makeId()}));
     return replace ? additions : [...clone(existing),...additions];
   }
-  return {types, scalarTypes, defaults, labels, clone, expression, variables, shares, formPayload, mergeImport};
+  return {types, scalarTypes, defaults, labels, clone, clientId, expression, variables, shares, formPayload, mergeImport};
 })();
 if (typeof module !== 'undefined') module.exports = RunForm;
 if (typeof document !== 'undefined') (() => {
-  const {types, scalarTypes, defaults, labels, clone, expression, variables, shares, formPayload, mergeImport} = RunForm;
+  const {types, scalarTypes, defaults, labels, clone, clientId, expression, variables, shares, formPayload, mergeImport} = RunForm;
   const $ = s => document.querySelector(s);
   const all = s => [...document.querySelectorAll(s)];
   const key = 'sqlpulse.last_form';
-  const uid = () => crypto.randomUUID();
+  const uid = clientId;
   let state = {version:3, mode:'form', groups:[], rows:[], sql:'', fileText:'', fileName:'', legacy:''};
   let pendingImport = null;
   let revision = 0, editor = null, selection = [0,0], undoTimer, analysisTimer, busy = false;

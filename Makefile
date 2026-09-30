@@ -1,10 +1,13 @@
-.PHONY: dev test unit lint compose-up compose-down deploy seed
+.PHONY: dev test unit unit-coverage lint compose-up compose-down deploy seed
 
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 
 test:
 	pytest tests/unit -v
+
+unit-coverage:
+	python -m pytest tests/unit -v --cov --cov-report=term-missing --cov-report=xml --cov-report=html
 
 it:
 	pytest tests/integration -v

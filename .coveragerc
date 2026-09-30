@@ -1,0 +1,19 @@
+[run]
+source = app
+branch = False
+relative_files = True
+data_file = test-results/unit-coverage/.coverage
+# Manual verification tools are test code, not application code.
+omit =
+    app/ai/verify_ai_tools.py
+    app/ai/verify_llm_client.py
+
+[report]
+precision = 2
+
+[xml]
+output = test-results/unit-coverage/coverage.xml
+
+[html]
+directory = test-results/unit-coverage/html
+title = SQLPulse Python unit test coverage

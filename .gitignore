@@ -7,6 +7,9 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.coverage
+.coverage.*
+test-results/
 
 # 本机开发产物（不进版本库）
 .workbuddy/

@@ -376,5 +376,8 @@ def get_report(run_id: str) -> Optional[dict]:
         return None
     d = dict(row)
     d["l0"] = json.loads(d.pop("l0_json"))
-    d["l1"] = json.loads(d.pop("l1_json"))
+    # l1_json 有两种形状：新版 dict（带 verdict）、旧版 list[dict]。
+    # 归一化后历史报告页不 500，只降级为"旧版规则建议"样式。
+    from app.services.l1.contract import normalize_l1
+    d["l1"] = normalize_l1(json.loads(d.pop("l1_json")))
     return d

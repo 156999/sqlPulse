@@ -39,9 +39,10 @@
 <div class="card">
   <h3>分语句统计</h3>
   <table class="table">
-    <thead><tr><th>语句</th><th>内容</th><th>请求数</th><th>失败数</th><th>平均</th><th>P95</th><th>P99</th><th>最大</th><th>QPS</th></tr></thead>
+    <thead><tr><th>语句</th><th>内容</th><th>请求数</th><th>失败数</th><th>平均</th><th>P95</th><th>P99</th><th>最大</th><th>QPS</th><th>计划问题</th><th>命中规则</th></tr></thead>
     <tbody>
-    {% for s in l0.per_sql %}
+    {% set per_sql_rows = l1_view.per_sql if l1_view else l0.per_sql %}
+    {% for s in per_sql_rows %}
       <tr>
         <td><code>{{ s.sql_id }}</code></td>
         <td class="sql-cell" title="{{ s.sql }}">{{ s.sql|truncate(60) }}</td>
@@ -51,27 +52,85 @@
         <td>{{ s.p99_ms|round(1) if s.p99_ms is not none else '-' }}</td>
         <td>{{ s.max_ms|round(1) if s.max_ms is not none else '-' }}</td>
         <td>{{ s.qps|round(1) if s.qps is not none else '-' }}</td>
+        <td class="muted">{{ s.plan_findings or '-' }}</td>
+        <td class="muted">{{ s.hit_rules or '-' }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="9" class="muted">无数据</td></tr>
+      <tr><td colspan="11" class="muted">无数据</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
 
+{% if l1_view %}
+<details class="card" open>
+  <summary>L1 诊断 <span class="tag">本地规则报告 · 未配置 LLM</span></summary>
+
+  <div class="advice {{ l1_view.verdict_cls }}">
+    <strong>{{ l1_view.verdict.title }}</strong>
+    <p>{{ l1_view.verdict.summary }}</p>
+    <p class="muted">严重 {{ l1_view.error_count }} · 警告 {{ l1_view.warn_count }}</p>
+  </div>
+
+  {% for f in l1_view.findings %}
+  <div class="advice {{ f.cls }}">
+    <strong>[{{ f.severity|upper }}] {{ f.title }}</strong>
+    {% if f.scope_text %}<p class="muted">定位：{{ f.scope_text }}</p>{% endif %}
+    {% if f.detail %}<p>{{ f.detail }}</p>{% endif %}
+    {% if f.evidence %}
+    <ul>
+      {% for e in f.evidence %}
+      <li><b>[{{ e.source_label }}]</b> {{ e.label }}：{{ e.value }}
+        {% if e.detail %}<span class="muted">（{{ e.detail }}）</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if f.root_cause %}<p>根因：{{ f.root_cause }}</p>{% endif %}
+    {% if f.actions %}
+    <ul>
+      {% for a in f.actions %}
+      <li>[{{ a.layer_label }}] {{ a.text }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">本轮无命中规则。</p>
+  {% endfor %}
+</details>
+
+{% if l1_view.completeness %}
+<div class="card">
+  <h3>采集完整性与局限</h3>
+  <table class="table">
+    <tr><th>执行计划</th><td>
+      {% if l1_view.completeness.plan_available %}
+        已采集 {{ l1_view.completeness.plan_probed or 0 }} / {{ l1_view.completeness.plan_statements or 0 }} 条语句
+      {% else %}
+        {{ l1_view.completeness.plan_reason }}
+      {% endif %}
+    </td></tr>
+    <tr><th>引擎指标</th><td>{{ l1_view.completeness.metrics_points or 0 }} 个采样点</td></tr>
+    <tr><th>样本量</th><td>{{ l1_view.completeness.total_requests or 0 }} 次请求</td></tr>
+    <tr><th>时长比</th><td>{{ l1_view.completeness.duration_ratio or 0 }}</td></tr>
+  </table>
+  <p class="muted">局限：EXPLAIN 的 rows 为优化器估算；EXPLAIN 只解释读路径，写路径锁竞争看行锁等待增量；
+    慢查询增量受目标库 long_query_time 影响，只能同库纵向对比。</p>
+</div>
+{% endif %}
+{% else %}
 <div class="card">
   <h3>L1 规则建议 <span class="tag">本地规则报告 · 未配置 LLM</span></h3>
   {% if report.l1 %}
-    {% for a in report.l1 %}
-      <div class="advice advice-{{ a.level }}">
-        <strong>[{{ a.level|upper }}] {{ a.title }}</strong>
-        <p>{{ a.detail }}</p>
+    {% for a in report.l1.findings if report.l1.findings is iterable %}
+      <div class="advice advice-{{ a.severity }}">
+        <strong>[{{ a.severity|upper }}] {{ a.title }}</strong>
+        {% if a.detail %}<p>{{ a.detail }}</p>{% endif %}
       </div>
     {% endfor %}
-  {% else %}
-    <p class="muted">无命中规则，各项指标在阈值内。</p>
   {% endif %}
 </div>
+{% endif %}
 
 <div class="form-actions">
   <a class="primary" href="/api/runs/{{ run.id }}/report/download">下载 Markdown 报告</a>

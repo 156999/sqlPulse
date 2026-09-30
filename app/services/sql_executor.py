@@ -1,7 +1,9 @@
 import re
 import threading
 import random
+from itertools import product
 from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -10,6 +12,15 @@ import pymysql
 _DELIMITER_RE = re.compile(r"(?i)^DELIMITER\s+(\S+)")
 _SENSITIVE_COLUMN_RE = re.compile(r"(password|passwd|pwd|token|secret|idcard|identity|credential)", re.I)
 _INSERT_COLUMNS_RE = re.compile(r"(?is)^\s*INSERT\s+INTO\s+[^()]+\((.*?)\)\s+VALUES\s*\(")
+_MAX_DETERMINISTIC_UNIQUE_PROBES = 5000
+
+
+@dataclass
+class UniqueResolution:
+    status: str
+    args: Optional[tuple] = None
+    candidates: Optional[list] = None
+    probed: int = 0
 
 
 def split_sql_statements(text: str) -> list:
@@ -262,6 +273,64 @@ class UniqueConstraintGuard:
             self.used[index["name"]].add(key)
 
 
+def _insert_columns(sql: str) -> list[str]:
+    match = _INSERT_COLUMNS_RE.search(sql)
+    if not match:
+        return []
+    return [part.strip().strip("`") for part in match.group(1).split(",")]
+
+
+def _resolve_sample_unique_conflict(stmt, sql: str, args: tuple, conflict: tuple[str, tuple, str],
+                                    sample_cache: SampleCache, unique_guard: UniqueConstraintGuard, cur,
+                                    variable_definitions: Optional[dict] = None):
+    if not hasattr(stmt, "generators"):
+        return UniqueResolution("not_applicable")
+    index_name, _, _ = conflict
+    index = next((candidate for candidate in unique_guard.indexes if candidate["name"] == index_name), None)
+    if not index or len(index["columns"]) < 2:
+        return UniqueResolution("not_applicable")
+    columns = _insert_columns(sql)
+    generators = list(getattr(stmt, "generators", []))
+    if len(columns) != len(args) or len(generators) != len(args):
+        return UniqueResolution("not_applicable")
+
+    value_options = []
+    column_positions = {}
+    for column in index["columns"]:
+        try:
+            position = columns.index(column)
+        except ValueError:
+            return UniqueResolution("not_applicable")
+        generator = generators[position]
+        if getattr(generator, "name", None) == "var" and variable_definitions:
+            generator = variable_definitions.get(generator.args[0], generator)
+        if getattr(generator, "name", None) != "sample":
+            return UniqueResolution("not_applicable")
+        rows = sample_cache._load(*generator.args)
+        values = [row[0] for row in rows]
+        if not values:
+            return UniqueResolution("not_applicable")
+        random.shuffle(values)
+        value_options.append(values)
+        column_positions[column] = position
+
+    probes = 0
+    for combo in product(*value_options):
+        probes += 1
+        if probes > _MAX_DETERMINISTIC_UNIQUE_PROBES:
+            break
+        next_args = list(args)
+        for column, value in zip(index["columns"], combo):
+            next_args[column_positions[column]] = value
+        next_args = tuple(next_args)
+        candidates = unique_guard.candidates(sql, next_args)
+        if unique_guard.conflict(cur, candidates) is None:
+            return UniqueResolution("resolved", next_args, candidates, probes)
+    if probes <= _MAX_DETERMINISTIC_UNIQUE_PROBES:
+        return UniqueResolution("exhausted", probed=probes)
+    return UniqueResolution("not_applicable", probed=probes)
+
+
 def execute_sql_job(
     job_id: str,
     dsn: dict,
@@ -330,7 +399,24 @@ def execute_sql_job(
                         conflict = unique_guard.conflict(cur, candidates) if unique_guard.enabled else None
                         if not conflict:
                             break
+                        resolution = _resolve_sample_unique_conflict(
+                            stmt, str(query), tuple(args or ()), conflict, sample_cache, unique_guard, cur,
+                            variable_definitions,
+                        )
+                        if resolution.status == "resolved":
+                            args, candidates = resolution.args, resolution.candidates
+                            break
                         index_name, key, source = conflict
+                        if resolution.status == "exhausted":
+                            _log_line(
+                                log_path,
+                                f"[{job_id}] {location} unique conflict index={index_name} "
+                                f"sample combination space exhausted probed={resolution.probed}",
+                            )
+                            raise ValueError(
+                                f"唯一约束 {index_name} 的 sample 候选组合已全部冲突，"
+                                f"请扩大父表样本范围或清理目标表已有组合"
+                            )
                         _log_line(
                             log_path,
                             f"[{job_id}] {location} unique conflict index={index_name} "

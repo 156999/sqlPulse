@@ -129,7 +129,8 @@ def test_good_sql_e2e(client):
     assert 5 <= len(points) <= 15  # ≈10s 采样
     assert any(p["qps"] and p["qps"] > 0 for p in points)
     r = _wait_report(client, run_id)
-    assert r.status_code == 200 and "压测报告" in r.text
+    assert r.status_code == 200 
+    assert r.text.startswith("# 压测诊断报告 · it-good")
 
 
 def test_bad_sql_fails(client):

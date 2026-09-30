@@ -1,6 +1,8 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {variables,expression,shares} = require('../../app/static/run_form.js');
+const {variables,expression,shares,clientId} = require('../../app/static/run_form.js');
+
+assert.match(clientId(), /^(?:[0-9a-f-]{36}|local-[a-z0-9]+-[a-z0-9]+)$/i);
 test('typed candidates retain punctuation, Unicode, newline and scalar types',()=>{
   const row={name:'value',type:'pick',choices:[{type:'string',value:"a,b'\\\n中文"},{type:'integer',value:'9007199254740993'},{type:'number',value:'2.5'},{type:'boolean',value:'true'},{type:'null',value:''}]};
   assert.equal(expression(row),`pick(${JSON.stringify("a,b'\\\n中文")},9007199254740993,2.5,True,None)`);

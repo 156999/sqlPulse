@@ -131,12 +131,20 @@ class DataGenJobCreate(BaseModel):
     field_rules: list[dict] = Field(default_factory=list)
     connection_id: Optional[str] = None
     db_dsn: Optional[DbDsn] = None
+    dependency_strategy: Literal["target_only", "direct_dependencies", "full_dependencies"] = "target_only"
+    dependency_plan: dict = Field(default_factory=dict)
+    confirm_dependency_writes: bool = False
 
 
 class DataGenMetadataRequest(BaseModel):
     table: str = Field(min_length=1, max_length=128)
     connection_id: Optional[str] = None
     db_dsn: Optional[DbDsn] = None
+
+
+class DataGenDependencyPlanRequest(DataGenMetadataRequest):
+    target_rows: int = Field(default=1, ge=1, le=1_000_000)
+    strategy: Literal["target_only", "direct_dependencies", "full_dependencies"] = "direct_dependencies"
 
 
 class DataGenTableListRequest(BaseModel):

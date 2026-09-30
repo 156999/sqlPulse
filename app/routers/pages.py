@@ -60,4 +60,9 @@ def report_page(request: Request, run_id: str):
     if not report:
         from app.services.report import generate_report
         report = generate_report(run_id)
-    return templates.TemplateResponse(request, "report.html", {"run": run, "report": report})
+    from app.services.l1 import build_view
+    l1_view = build_view(report["l1"], report.get("l0") or {}) if report else None
+    return templates.TemplateResponse(
+        request, "report.html",
+        {"run": run, "report": report, "l1_view": l1_view},
+    )

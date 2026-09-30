@@ -70,6 +70,18 @@ class SqlInput(BaseModel):
         return self
 
 
+class SmartCompleteRequest(BaseModel):
+    sql: str = Field(min_length=1, max_length=200000)
+    connection_id: Optional[str] = None
+    db_dsn: Optional[DbDsn] = None
+
+    @model_validator(mode="after")
+    def one_connection(self):
+        if (self.connection_id is None) == (self.db_dsn is None):
+            raise ValueError("connection_id 与 db_dsn 必须且只能提供一个")
+        return self
+
+
 class FormTools(BaseModel):
     action: Literal["import", "convert", "serialize", "normalize", "variables", "rename", "analyze"]
     sql_content: str = ""

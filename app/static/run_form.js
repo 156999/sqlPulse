@@ -7,8 +7,19 @@ const RunForm = (() => {
   const labels = {rand:['最小值','最大值'], randf:['最小值','最大值','小数位'], randstr:['长度'], randdate:['开始日期','结束日期'], randdt:['开始时间','结束时间'], uuid:[]};
   const clone = x => JSON.parse(JSON.stringify(x));
   function clientId() {
-    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
-    return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    // Some embedded browsers expose crypto but not randomUUID, or throw when
+    // crypto APIs are accessed from an insecure origin. IDs only need to be
+    // unique in the current form, so always keep a local fallback available.
+    try {
+      const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+      if (cryptoApi && typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID();
+      if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+        const bytes = new Uint8Array(16);
+        cryptoApi.getRandomValues(bytes);
+        return `local-${Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')}`;
+      }
+    } catch (_) { /* Fall through to the non-cryptographic local ID. */ }
+    return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
   }
   function numeric(value, integer=false) {
     const text = String(value).trim();
@@ -203,10 +214,28 @@ if (typeof document !== 'undefined') (() => {
       const area=element('textarea');area.rows=6;area.value=g.sql;area.spellcheck=false;area.setAttribute('aria-label',g.name+' SQL');area.placeholder="SELECT * FROM orders WHERE id = {{var('order_id')}};";
       area.addEventListener('input',()=>{g.sql=area.value;changed();});
       area.addEventListener('paste',()=>setTimeout(()=>normalizeGroup(g),0));remember(area);label.append(area);
-      body.append(note,label,button('识别已有事务边界',()=>normalizeGroup(g)),element('p','','hint references'));
+      const tools=element('div','', 'form-actions');
+      tools.append(button('智能补全占位符',()=>smartComplete(g,area)),button('识别已有事务边界',()=>normalizeGroup(g)));
+      body.append(note,label,tools,element('p','','hint references'));
       card.append(head,controls,body,element('p','','field-error'));$('#task-list').append(card);
     });
     refresh();analyze();
+  }
+  async function smartComplete(g, area) {
+    try {
+      const body={sql:g.sql};
+      if(connMode()==='saved') { if(!$('#f-connection-id').value) throw Error('请选择已保存连接'); body.connection_id=$('#f-connection-id').value; }
+      else body.db_dsn=dsn();
+      const result=await api('/api/runs/smart-complete',body);
+      if(!result.suggestions?.length) { alert(result.message || '没有可补全的条件'); return; }
+      const before=g.sql;
+      const suggestions=result.suggestions;
+      g.sql=before;
+      for (const suggestion of [...suggestions].sort((a,b)=>b.start-a.start)) {
+        g.sql=g.sql.slice(0,suggestion.start)+suggestion.replacement+g.sql.slice(suggestion.end);
+      }
+      renderGroups();changed();undo(`已自动补全 ${suggestions.length} 处占位符。`,null,()=>{g.sql=before;renderGroups();changed();});
+    } catch(e) { fail(e); }
   }
   function newRow() {return {id:uid(),name:'',type:'rand',args:clone(defaults.rand),choices:[]};}
   function renderRows() {

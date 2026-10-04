@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     auth_allow_register: bool = True
     auth_seed_root: bool = True
 
+    mcp_user_id: Optional[str] = None
+    mcp_username: Optional[str] = None
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8765
+
     @model_validator(mode="after")
     def _require_secret_key_when_auth_enabled(self):
         if self.auth_enabled and not self.app_secret_key:

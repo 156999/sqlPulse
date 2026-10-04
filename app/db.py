@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE TABLE IF NOT EXISTS datagen_jobs (
   id                TEXT PRIMARY KEY,
+  owner_user_id     TEXT,
   name              TEXT NOT NULL,
   mode              TEXT NOT NULL,
   status            TEXT NOT NULL,
@@ -171,6 +172,9 @@ def init_schema() -> None:
         for col, typ in _METRIC_ALTERS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+        datagen_columns = {r[1] for r in conn.execute("PRAGMA table_info(datagen_jobs)")}
+        if "owner_user_id" not in datagen_columns:
+            conn.execute("ALTER TABLE datagen_jobs ADD COLUMN owner_user_id TEXT")
     seed_root_user()
 
 
@@ -316,9 +320,9 @@ def update_run(run_id: str, fields: dict) -> None:
 def create_datagen_job(row: dict) -> None:
     with tx() as conn:
         conn.execute(
-            "INSERT INTO datagen_jobs (id,name,mode,status,target_dsn_json,input_json,created_at)"
-            " VALUES (:id,:name,:mode,:status,:target_dsn_json,:input_json,:created_at)",
-            row,
+            "INSERT INTO datagen_jobs (id,owner_user_id,name,mode,status,target_dsn_json,input_json,created_at)"
+            " VALUES (:id,:owner_user_id,:name,:mode,:status,:target_dsn_json,:input_json,:created_at)",
+            {"owner_user_id": None, **row},
         )
 
 
@@ -327,9 +331,34 @@ def get_datagen_job(job_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_datagen_job_for_user(user_id: str, job_id: str) -> Optional[dict]:
+    row = _fetch_one(
+        "SELECT * FROM datagen_jobs WHERE id=? AND owner_user_id=?",
+        (job_id, user_id),
+    )
+    return dict(row) if row else None
+
+
 def list_datagen_jobs() -> list:
     rows = _fetch_all("SELECT * FROM datagen_jobs ORDER BY created_at DESC")
     return [dict(r) for r in rows]
+
+
+def list_datagen_jobs_for_user(user_id: str) -> list:
+    rows = _fetch_all(
+        "SELECT * FROM datagen_jobs WHERE owner_user_id=? ORDER BY created_at DESC",
+        (user_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+def claim_legacy_datagen_jobs(user_id: str) -> int:
+    with tx() as conn:
+        cur = conn.execute(
+            "UPDATE datagen_jobs SET owner_user_id=? WHERE owner_user_id IS NULL",
+            (user_id,),
+        )
+        return cur.rowcount
 
 
 def update_datagen_job(job_id: str, fields: dict) -> None:

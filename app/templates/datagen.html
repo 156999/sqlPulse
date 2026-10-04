@@ -343,12 +343,24 @@ $id('btn-example-shell').addEventListener('click', async () => {
   saveForm();
 });
 
+async function readDatagenResponse(resp) {
+  const text = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    if (!resp.ok) throw Error('请求失败（HTTP ' + resp.status + '），服务端未返回 JSON，请查看服务端日志。');
+    throw Error('服务端响应格式错误：预期 JSON。');
+  }
+  return data;
+}
+
 async function testConn(url, options, resultId) {
   const r = $id(resultId);
   r.textContent = '测试中...'; r.className = 'hint';
   try {
     const resp = await fetch(url, options);
-    const data = await resp.json();
+    const data = await readDatagenResponse(resp);
     if (data.ok) { r.textContent = '✓ 连接成功'; r.className = 'hint ok'; }
     else { r.textContent = '✗ ' + (data.error || '连接失败'); r.className = 'hint err'; }
   } catch (err) {
@@ -379,7 +391,7 @@ async function loadFormTableOptions(query='') {
     const body={...datagenConnectionBody(),query};
     if(!body.connection_id && !body.db_dsn) return;
     const resp=await fetch('/api/datagen/tables',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const data=await resp.json(); if(!resp.ok) throw Error(data.detail||'读取数据表失败');
+    const data=await readDatagenResponse(resp); if(!resp.ok) throw Error(data.detail||'读取数据表失败');
     list.replaceChildren(...data.tables.map(name=>{const option=document.createElement('option');option.value=name;return option;}));
   } catch(e) {
     list.replaceChildren();
@@ -424,7 +436,7 @@ async function refreshMetadata(validateOnly=false) {
       body.rules = (datagenMetadata?.columns || []).map(col => ({column: col.name, nullable: col.nullable, unique: col.key === 'PRI' || col.key === 'UNI', length: {max: col.max_length}}));
     }
     const resp = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const data = await resp.json();
+    const data = await readDatagenResponse(resp);
     if (!resp.ok) throw Error(data.detail || '请求失败');
     renderMetadata(validateOnly ? data.metadata : data, validateOnly ? data.errors : []);
     if (!validateOnly) await refreshDependencyPlan();
@@ -443,7 +455,7 @@ async function refreshDependencyPlan() {
   try {
     const body = {...datagenConnectionBody(), table, target_rows:+$id('f-form-row-count').value || 1, strategy:$id('f-dependency-strategy').value};
     const resp = await fetch('/api/datagen/dependency-plan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    const data = await resp.json(); if (!resp.ok) throw Error(data.detail || '依赖分析失败');
+    const data = await readDatagenResponse(resp); if (!resp.ok) throw Error(data.detail || '依赖分析失败');
     dependencyPlan = data;
     const deps = (data.dependencies || []).map(item => `${item.table}：当前 ${item.current_rows}，建议补 ${item.planned_rows} 条（${item.reason}）`).join('\n');
     const spaces = (data.unique_spaces || []).map(item => `${item.index}(${item.columns.join(' + ')}): 理论 ${item.total_space}，已占用 ${item.occupied_space}，剩余 ${item.available_space}，目标 ${item.required_rows}`).join('\n');
@@ -500,7 +512,7 @@ async function loadFormTable() {
   hint.textContent='读取中...';
   try {
     const resp=await fetch('/api/datagen/metadata',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...datagenConnectionBody(),table})});
-    const data=await resp.json(); if(!resp.ok) throw Error(data.detail || '读取失败');
+    const data=await readDatagenResponse(resp); if(!resp.ok) throw Error(data.detail || '读取失败');
     formRules={}; formRulesValid=false; renderFormFields(data); $id('btn-apply-form-rules').disabled=false; hint.textContent=`✓ 已读取 ${data.columns.length} 个字段，请配置后应用数据库规则`; hint.className='hint ok';
   } catch(e) { hint.textContent='✗ '+e.message; hint.className='hint err'; }
 }
@@ -508,7 +520,7 @@ async function applyFormRules() {
   const hint=$id('form-metadata-result'), table=$id('f-form-table').value.trim(); hint.textContent='正在应用数据库规则...';hint.className='hint';
   try {
     const body={...datagenConnectionBody(),table,row_count:+$id('f-form-row-count').value||1,rules:Object.values(formRules)};
-    const resp=await fetch('/api/datagen/rules/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await resp.json();if(!resp.ok)throw Error(data.detail||'应用失败');
+    const resp=await fetch('/api/datagen/rules/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await readDatagenResponse(resp);if(!resp.ok)throw Error(data.detail||'应用失败');
     formRules=Object.fromEntries(data.rules.map(rule=>[rule.column,rule]));formRulesValid=data.ok;renderFormFields(data.metadata,true);
     const summary=data.changes.map(x=>`${x.column}：${JSON.stringify(x.before)} → ${JSON.stringify(x.after)}（${x.reason}）`).join('；');
     hint.textContent=(data.ok?'✓ ':'✗ ')+`调整 ${data.changes.length} 项`+(summary?'：'+summary:'')+(data.errors.length?'；错误：'+data.errors.map(x=>x.column+' '+x.message).join('；'):'');hint.className=data.ok?'hint ok':'hint err';
@@ -608,7 +620,7 @@ $id('datagen-form').addEventListener('submit', async (e) => {
   $id('btn-submit').disabled = true; hint.textContent = '提交中...'; hint.className = 'hint';
   try {
     const resp = await fetch('/api/datagen/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-    const data = await resp.json();
+    const data = await readDatagenResponse(resp);
     if (resp.ok) {
       hint.textContent = '✓ 已创建造数任务 ' + data.job_id;
       hint.className = 'hint ok';

@@ -1,0 +1,124 @@
+{# 网页「AI 诊断（L2）」卡片与 htmx 片段。
+   fragment_only=true 时只渲染诊断区域（htmx 轮询用）；否则渲染整卡（report.html 引入）。
+   上下文：run_id、ai（密钥状态）、job_view（最近一次 job）、ai_key_error（可选）。
+   密钥一律只显示掩码；模型输出由 Jinja 默认转义，按纯文本渲染。 #}
+{% set run_id = run_id if run_id is defined else run.id %}
+
+{% macro key_area() %}
+<p>
+{% if ai.source == 'user' %}
+  当前密钥：<code>{{ ai.masked }}</code>
+  <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }} · 费用由该密钥承担</span>
+{% elif ai.source == 'server' %}
+  将使用服务器默认密钥 <code>{{ ai.masked }}</code>
+  <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }}</span>
+{% elif ai.source == 'broken' %}
+  已保存的密钥无法解密（APP_SECRET_KEY 可能已更换），请重新填写。
+{% else %}
+  <span class="muted">未配置密钥：AI 诊断不会调用模型。</span>
+{% endif %}
+</p>
+{% if ai_key_error %}<p class="err-msg">{{ ai_key_error }}</p>{% endif %}
+<form method="post" action="/api/ai/key" class="ai-key-form">
+  <input type="hidden" name="run_id" value="{{ run_id }}">
+  <input type="password" name="api_key" autocomplete="new-password" maxlength="1024"
+         placeholder="sk-…（粘贴你的模型 API Key{% if ai.source not in ('none', 'broken') %}，保存后优先生效{% endif %}）">
+  <button class="primary">{{ '替换密钥' if ai.source in ('user', 'broken') else '保存密钥' }}</button>
+</form>
+{% if ai.source in ('user', 'broken') %}
+<form method="post" action="/api/ai/key/delete" class="ai-key-form">
+  <input type="hidden" name="run_id" value="{{ run_id }}">
+  <button>删除密钥</button>
+</form>
+{% endif %}
+{% endmacro %}
+
+{% macro error_text(err) -%}
+{%- if err.code == 'LLM_AUTH_FAILED' -%}模型鉴权失败（401）：密钥无效或已失效，请检查后重试
+{%- elif err.code == 'LLM_INSUFFICIENT_BALANCE' -%}模型返回 402：账户余额不足
+{%- elif err.code == 'LLM_RATE_LIMITED' -%}模型返回 429：请求频率受限，请稍后重试
+{%- elif err.code in ('LLM_TIMEOUT', 'LLM_CONNECTION_ERROR') -%}无法连接模型服务，请检查网络后重试
+{%- elif err.code == 'LLM_CONFIG_ERROR' -%}未配置可用的模型密钥
+{%- elif err.code == 'KEY_UNDECRYPTABLE' -%}已保存的密钥无法解密（APP_SECRET_KEY 可能已更换），请重新填写
+{%- elif err.code == 'PLATFORM_RESTARTED' -%}平台重启中断了本次诊断，请重新开始
+{%- else -%}{{ err.message }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro diagnose_area() %}
+{% if job_view.status == 'none' %}
+  {% if ai.source == 'none' %}
+  <p class="muted">请先在上方填写 API Key，再开始诊断。</p>
+  {% else %}
+  <button class="primary" hx-post="/api/runs/{{ run_id }}/ai/diagnose"
+          hx-target="#ai-diag-area" hx-swap="innerHTML">开始 AI 诊断</button>
+  <p class="hint">收集本轮指标与执行计划，调用模型生成 L2 诊断；费用由上方密钥承担，可能需要数十秒。</p>
+  {% endif %}
+{% elif job_view.status in ('pending', 'running') %}
+  <div hx-get="/api/runs/{{ run_id }}/ai/diagnose/{{ job_view.job_id }}/fragment"
+       hx-trigger="every 2s" hx-target="#ai-diag-area" hx-swap="innerHTML">
+    <p>诊断进行中……（{{ '排队中' if job_view.status == 'pending' else '已开始' }}，
+       {{ job_view.started_at or job_view.created_at }}）</p>
+  </div>
+{% elif job_view.error %}
+  <div class="advice advice-error">
+    <strong>诊断失败</strong>
+    <p>{{ error_text(job_view.error) }}</p>
+  </div>
+  {% if ai.source != 'none' %}
+  <button class="primary" hx-post="/api/runs/{{ run_id }}/ai/diagnose"
+          hx-target="#ai-diag-area" hx-swap="innerHTML">重新诊断</button>
+  {% endif %}
+{% else %}
+  {% set d = job_view.result.diagnosis %}
+  <div class="advice advice-info">
+    <strong>AI 诊断结论（L2）</strong>
+    <p>{{ d.summary }}</p>
+  </div>
+  {% for f in d.findings %}
+  <div class="advice {{ 'advice-error' if f.priority == 'high' else ('advice-warn' if f.priority == 'medium' else '') }}">
+    <strong>[{{ f.priority|upper }}] {{ f.title }}</strong>
+    <p>{{ f.observation }}</p>
+    <p class="muted">推测：{{ f.hypothesis }}<br>证据：{% for e in f.evidence_ids %}<code>{{ e }}</code> {% endfor %}</p>
+    <ul>
+      {% for s in f.next_steps %}<li>{{ s }}</li>{% endfor %}
+    </ul>
+    <p class="muted">不确定性：{{ f.uncertainty }}</p>
+  </div>
+  {% else %}
+  <p class="muted">模型未报告任何问题（findings 为空）。</p>
+  {% endfor %}
+  {% if d.limitations %}
+  <details>
+    <summary>局限（{{ d.limitations|length }}）</summary>
+    <ul>{% for x in d.limitations %}<li>{{ x }}</li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+  <p class="muted">
+    {% if job_view.result.model %}模型 {{ job_view.result.model }} · {% endif %}
+    {% if job_view.result.usage %}token：输入 {{ job_view.result.usage.prompt_tokens }} / 输出 {{ job_view.result.usage.completion_tokens }} · {% endif %}
+    生成预算 {{ job_view.result.budget.max_tokens }} token
+    <br>{{ job_view.result.validation }}
+  </p>
+  {% if job_view.warnings %}
+  <details>
+    <summary>收集警告（{{ job_view.warnings|length }}）</summary>
+    <ul>{% for w in job_view.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+  <button class="primary" hx-post="/api/runs/{{ run_id }}/ai/diagnose"
+          hx-target="#ai-diag-area" hx-swap="innerHTML">重新诊断</button>
+{% endif %}
+{% endmacro %}
+
+{% if fragment_only %}
+{{ diagnose_area() }}
+{% else %}
+<details class="card" id="ai-diagnose" open>
+  <summary>AI 诊断（L2） <span class="tag">模型分析 · 按次计费</span></summary>
+  {{ key_area() }}
+  <div id="ai-diag-area" class="ai-diag-area">
+    {{ diagnose_area() }}
+  </div>
+</details>
+{% endif %}

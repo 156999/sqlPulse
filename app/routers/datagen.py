@@ -10,12 +10,14 @@ from loguru import logger
 from app import db
 from app.auth import get_current_user, require_user
 from app.config import settings
-from app.models import DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
+from app.models import DataGenAnalyzeRequest, DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
 from app.services.datagen import datagen_executor
 from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
 from app.services.datagen_dependencies import build_dependency_plan
 from app.services.runner import now_iso
+from app.services.sql_executor import split_sql_statements
+from app.services.sql_grouping import describe_statements
 from app.services.script_runner import tail_file
 from app.templating import templates
 
@@ -50,6 +52,7 @@ def _safe_job(job: dict) -> dict:
         "mode": job["mode"],
         "status": job["status"],
         "source": payload.get("source", "paste"),
+        "concurrency": payload.get("concurrency"),
         "rows_affected": job.get("rows_affected"),
         "error_msg": job.get("error_msg"),
         "created_at": job.get("created_at"),
@@ -58,8 +61,7 @@ def _safe_job(job: dict) -> dict:
     }
 
 
-@router.get("/datagen")
-def datagen_page(request: Request):
+def _datagen_page_context(request: Request, initial_mode: str = "") -> dict:
     default_dsn = {
         "host": settings.target_db_host,
         "port": settings.target_db_port,
@@ -68,18 +70,30 @@ def datagen_page(request: Request):
         "database": settings.target_db_name,
     }
     user_id = connection_manager.current_user_id(get_current_user(request))
+    return {
+        "default_dsn": default_dsn,
+        "connections": [connection_manager.to_public_connection(c) for c in db.list_connections(user_id)],
+        "jobs": db.list_datagen_jobs(),
+        "script_enabled": settings.datagen_script_execution_enabled,
+        "env_vars": _ENV_VARS,
+        "max_sql_chars": settings.datagen_max_sql_chars,
+        "max_script_chars": settings.datagen_max_script_chars,
+        "initial_mode": initial_mode,
+        # 子栏目模式：隐藏标签栏，只呈现多表导入面板
+        "standalone": initial_mode == "multi",
+    }
+
+
+@router.get("/datagen")
+def datagen_page(request: Request):
+    return templates.TemplateResponse(request, "datagen.html", _datagen_page_context(request))
+
+
+@router.get("/datagen/multi")
+def datagen_multi_page(request: Request):
+    """「多表导入」子栏目：复用造数模板，但不渲染标签栏，直接进入多表导入面板。"""
     return templates.TemplateResponse(
-        request,
-        "datagen.html",
-        {
-            "default_dsn": default_dsn,
-            "connections": [connection_manager.to_public_connection(c) for c in db.list_connections(user_id)],
-            "jobs": db.list_datagen_jobs(),
-            "script_enabled": settings.datagen_script_execution_enabled,
-            "env_vars": _ENV_VARS,
-            "max_sql_chars": settings.datagen_max_sql_chars,
-            "max_script_chars": settings.datagen_max_script_chars,
-        },
+        request, "datagen.html", _datagen_page_context(request, initial_mode="multi")
     )
 
 
@@ -95,14 +109,14 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
         raise HTTPException(status_code=400, detail="造数内容为空")
     if body.mode == "shell" and not settings.datagen_script_execution_enabled:
         raise HTTPException(status_code=400, detail="Shell 造数未开启（DATAGEN_SCRIPT_EXECUTION_ENABLED=false）")
-    max_chars = settings.datagen_max_sql_chars if body.mode == "sql" else settings.datagen_max_script_chars
+    max_chars = settings.datagen_max_script_chars if body.mode == "shell" else settings.datagen_max_sql_chars
     if len(content) > max_chars:
         raise HTTPException(status_code=400, detail=f"造数内容超过 {max_chars} 字符限制")
-    if body.mode == "sql":
+    if body.mode in ("sql", "multi"):
         try:
             from app.services.sql_params import compile_statement, compile_variables
             definitions = compile_variables(body.variables)
-            statements = __import__("app.services.sql_executor", fromlist=["split_sql_statements"]).split_sql_statements(content)
+            statements = split_sql_statements(content)
             if not statements:
                 raise ValueError("没有可执行的 SQL 语句")
             for i, statement in enumerate(statements, 1):
@@ -140,6 +154,7 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
         "target_dsn_json": dsn.model_dump_json(),
         "input_json": json.dumps({"source": body.source, "content": content,
                                    "variables": body.variables, "row_count": body.row_count,
+                                   "concurrency": body.concurrency,
                                    "target_table": body.target_table, "field_rules": applied_rules,
                                    "unique_indexes": unique_indexes,
                                    "dependency_strategy": body.dependency_strategy,
@@ -156,6 +171,20 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
         logger.exception("start datagen job {} failed", job_id)
         raise HTTPException(status_code=500, detail=f"启动造数任务失败：{e}")
     return {"job_id": job_id}
+
+
+@router.post("/api/datagen/analyze")
+def analyze_datagen_content(body: DataGenAnalyzeRequest):
+    """多表导入前的分组预览：按目标表拆分语句，供用户确认后再并发执行。"""
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="分析内容为空")
+    if len(content) > settings.datagen_max_sql_chars:
+        raise HTTPException(status_code=400, detail=f"造数内容超过 {settings.datagen_max_sql_chars} 字符限制")
+    statements = split_sql_statements(content)
+    if not statements:
+        raise HTTPException(status_code=400, detail="没有可执行的 SQL 语句")
+    return describe_statements(statements)
 
 
 @router.post("/api/datagen/dependency-plan")

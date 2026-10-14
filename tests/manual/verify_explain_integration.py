@@ -23,6 +23,7 @@
 import csv as csv_mod
 import html as html_mod
 import json
+import os
 import pathlib
 import re
 import sys
@@ -37,7 +38,8 @@ def csv_cutter(path):
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv_mod.DictReader(f))
 
-BASE = "http://127.0.0.1:8080"
+# 宿主端口以 .env 的 WEB_PORT 为准（本机 8080 落在 Windows 保留段，已改用 18080）
+BASE = os.environ.get("SQLPULSE_BASE", "http://127.0.0.1:8080")
 MYSQL = dict(host="127.0.0.1", port=3307, user="root",
              password="s3cret", database="sqlpulse_demo", autocommit=True)
 DSN = {"host": "127.0.0.1", "port": 3307, "user": "root",

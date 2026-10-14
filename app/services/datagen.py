@@ -12,6 +12,7 @@ from app.services.sql_executor import execute_sql_job, split_sql_statements
 from app.services.sql_params import compile_statement, compile_variables
 from app.services.datagen_dependencies import build_dependency_plan, build_parent_insert
 from app.services.datagen_rules import read_table_metadata
+from app.services.credential_crypto import decrypt_dsn_snapshot
 
 
 class DataGenExecutor:
@@ -69,7 +70,7 @@ class DataGenExecutor:
     def _worker(self, job_id: str, event: threading.Event) -> None:
         try:
             job = db.get_datagen_job(job_id)
-            dsn = json.loads(job["target_dsn_json"])
+            dsn = decrypt_dsn_snapshot(json.loads(job["target_dsn_json"]))
             payload = json.loads(job["input_json"])
             job_dir = settings.data_dir / "datagen" / job_id
             job_dir.mkdir(parents=True, exist_ok=True)

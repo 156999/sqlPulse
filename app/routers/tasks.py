@@ -10,6 +10,7 @@ from app import db
 from app.auth import require_user
 from app.models import DbDsn, TaskCreate, SqlInput, FormTools, PreviewResult, SmartCompleteRequest
 from app.services import connection_manager
+from app.services.credential_crypto import encrypt_dsn_snapshot
 from app.services.runner import now_iso, runner, parse_sql_tasks
 from app.services.run_form import prepare, preview, form_tools, FormError
 from app.services.datagen_rules import read_table_metadata
@@ -94,7 +95,7 @@ def create_run(body: TaskCreate, user: Optional[dict] = Depends(require_user)):
         "concurrency": body.concurrency,
         "spawn_rate": body.spawn_rate,
         "duration_sec": body.duration_sec,
-        "db_dsn_json": dsn.model_dump_json(),
+        "db_dsn_json": json.dumps(encrypt_dsn_snapshot(dsn.model_dump()), ensure_ascii=False),
         "created_at": now_iso(),
     }
     db.create_run(row)

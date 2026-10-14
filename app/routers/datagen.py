@@ -12,6 +12,7 @@ from app.auth import get_current_user, require_user
 from app.config import settings
 from app.models import DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
+from app.services.credential_crypto import encrypt_dsn_snapshot
 from app.services.datagen import datagen_executor
 from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
 from app.services.datagen_dependencies import build_dependency_plan
@@ -137,7 +138,7 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
         "name": body.name,
         "mode": body.mode,
         "status": "pending",
-        "target_dsn_json": dsn.model_dump_json(),
+        "target_dsn_json": json.dumps(encrypt_dsn_snapshot(dsn.model_dump()), ensure_ascii=False),
         "input_json": json.dumps({"source": body.source, "content": content,
                                    "variables": body.variables, "row_count": body.row_count,
                                    "target_table": body.target_table, "field_rules": applied_rules,

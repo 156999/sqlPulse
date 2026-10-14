@@ -7,6 +7,7 @@ from typing import Any, Iterator, Optional
 from uuid import uuid4
 
 from app.config import settings
+from app.services.credential_crypto import credential_crypto, encrypt_dsn_snapshot
 
 _local = threading.local()
 _conn: Optional[sqlite3.Connection] = None
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS mysql_connections (
   port        INTEGER NOT NULL DEFAULT 3306,
   user        TEXT NOT NULL,
   password    TEXT NOT NULL DEFAULT '',
+  password_ciphertext TEXT,
   database    TEXT NOT NULL,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
@@ -167,11 +169,42 @@ def init_schema() -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN groups_json TEXT NOT NULL DEFAULT '[]'")
         if "variables_json" not in run_columns:
             conn.execute("ALTER TABLE runs ADD COLUMN variables_json TEXT NOT NULL DEFAULT '{}'")
+        connection_columns = {r[1] for r in conn.execute("PRAGMA table_info(mysql_connections)")}
+        if "password_ciphertext" not in connection_columns:
+            conn.execute("ALTER TABLE mysql_connections ADD COLUMN password_ciphertext TEXT")
         existing = {r[1] for r in conn.execute("PRAGMA table_info(metrics)")}
         for col, typ in _METRIC_ALTERS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+        _migrate_plaintext_credentials(conn)
     seed_root_user()
+
+
+def _migrate_plaintext_credentials(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT id, password, password_ciphertext FROM mysql_connections"
+    ).fetchall()
+    for row in rows:
+        if row["password_ciphertext"] or not row["password"]:
+            continue
+        conn.execute(
+            "UPDATE mysql_connections SET password='', password_ciphertext=? WHERE id=?",
+            (credential_crypto.encrypt(row["password"]), row["id"]),
+        )
+
+    for table, column in (("runs", "db_dsn_json"), ("datagen_jobs", "target_dsn_json")):
+        rows = conn.execute(f"SELECT id, {column} FROM {table}").fetchall()
+        for row in rows:
+            try:
+                dsn = json.loads(row[column])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{table}.{column} contains invalid JSON for id={row['id']}") from exc
+            if "password" not in dsn:
+                continue
+            conn.execute(
+                f"UPDATE {table} SET {column}=? WHERE id=?",
+                (json.dumps(encrypt_dsn_snapshot(dsn), ensure_ascii=False), row["id"]),
+            )
 
 
 def get_user_by_username(username: str) -> Optional[dict]:
@@ -229,10 +262,13 @@ def create_connection(user_id: str, fields: dict) -> dict:
     with tx() as c:
         params = dict(fields)
         params["user_id"] = user_id
+        if "password_ciphertext" not in params:
+            params["password_ciphertext"] = credential_crypto.encrypt(params.pop("password", ""))
+        params["password"] = ""
         c.execute(
             "INSERT INTO mysql_connections"
-            " (id,user_id,name,host,port,user,password,database,created_at,updated_at)"
-            " VALUES (:id,:user_id,:name,:host,:port,:user,:password,:database,:created_at,:updated_at)",
+            " (id,user_id,name,host,port,user,password,password_ciphertext,database,created_at,updated_at)"
+            " VALUES (:id,:user_id,:name,:host,:port,:user,:password,:password_ciphertext,:database,:created_at,:updated_at)",
             params,
         )
         row = c.execute(
@@ -245,6 +281,9 @@ def create_connection(user_id: str, fields: dict) -> dict:
 def update_connection(user_id: str, connection_id: str, fields: dict) -> Optional[dict]:
     with tx() as c:
         fields = {k: v for k, v in fields.items() if k != "updated_at"}
+        if "password" in fields and "password_ciphertext" not in fields:
+            fields["password_ciphertext"] = credential_crypto.encrypt(fields.pop("password"))
+            fields["password"] = ""
         sets = ", ".join(f"{k}=:{k}" for k in fields)
         params = dict(fields)
         params["connection_id"] = connection_id

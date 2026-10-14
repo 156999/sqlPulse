@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from app import db
 from app.models import DbDsn
+from app.services.credential_crypto import credential_crypto
 
 ANONYMOUS_USER_ID = "anonymous"
 _CONNECT_TIMEOUT = 3
@@ -25,7 +26,7 @@ def to_public_connection(row: dict) -> dict:
         "database": row["database"],
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
-        "has_password": bool(row.get("password")),
+        "has_password": bool(row.get("password_ciphertext") or row.get("password")),
     }
 
 
@@ -33,11 +34,12 @@ def resolve_connection(user_id: str, connection_id: str) -> DbDsn:
     row = db.get_connection(user_id, connection_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"连接 {connection_id} 不存在")
+    password_value = row.get("password_ciphertext") or row.get("password") or ""
     return DbDsn(
         host=row["host"],
         port=row["port"],
         user=row["user"],
-        password=row["password"],
+        password=credential_crypto.decrypt(password_value),
         database=row["database"],
     )
 

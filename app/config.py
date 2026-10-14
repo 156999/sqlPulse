@@ -1,7 +1,6 @@
 from pathlib import Path
-from typing import Optional
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -15,6 +14,9 @@ class Settings(BaseSettings):
     target_db_user: str = "root"
     target_db_password: str = ""
     target_db_name: str = "sqlpulse_demo"
+
+    credential_key: str = Field(default="", validation_alias="SQLPULSE_CREDENTIAL_KEY")
+    credential_key_version: str = Field(default="v1", validation_alias="SQLPULSE_CREDENTIAL_KEY_VERSION")
 
     data_dir: Path = BASE_DIR / "data"
     logs_dir: Path = BASE_DIR / "logs"
@@ -45,6 +47,8 @@ class Settings(BaseSettings):
     def _require_secret_key_when_auth_enabled(self):
         if self.auth_enabled and not self.app_secret_key:
             raise ValueError("APP_SECRET_KEY must be set when AUTH_ENABLED=true")
+        if self.auth_enabled and not self.credential_key:
+            raise ValueError("SQLPULSE_CREDENTIAL_KEY must be set when AUTH_ENABLED=true")
         return self
 
     def ensure_dirs(self) -> None:

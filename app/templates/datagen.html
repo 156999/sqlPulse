@@ -1,8 +1,10 @@
 {% extends "base.html" %}
-{% block title %}造数 · SQL Pulse{% endblock %}
-{% block nav_datagen %}class="active"{% endblock %}
+{% block title %}{{ '多表导入' if standalone else '造数' }} · SQL Pulse{% endblock %}
+{% block nav_datagen %}{% if not standalone %}class="active"{% endif %}{% endblock %}
+{% block nav_datagen_multi %}class="nav-sub{% if standalone %} active{% endif %}"{% endblock %}
 {% block content %}
-<h1>造数</h1>
+{% set mode = initial_mode or 'form' %}
+<h1>{{ '多表导入' if standalone else '造数' }}</h1>
 
 <form id="datagen-form" class="card">
   <div class="form-row">
@@ -50,14 +52,16 @@
   </fieldset>
 
   <fieldset>
-    <legend>造数方式</legend>
+    <legend>{% if standalone %}导入方式{% else %}造数方式{% endif %}</legend>
+    {% if not standalone %}
     <div class="tabs">
-      <button type="button" class="tab active" data-mode="form">单表表单</button>
-      <button type="button" class="tab" data-mode="sql">SQL</button>
-      <button type="button" class="tab" data-mode="shell">Shell</button>
+      <button type="button" class="tab {% if mode == 'form' %}active{% endif %}" data-mode="form">单表表单</button>
+      <button type="button" class="tab {% if mode == 'sql' %}active{% endif %}" data-mode="sql">SQL</button>
+      <button type="button" class="tab {% if mode == 'shell' %}active{% endif %}" data-mode="shell">Shell</button>
     </div>
+    {% endif %}
 
-    <div id="panel-form">
+    <div id="panel-form"{% if mode != 'form' %} style="display:none"{% endif %}>
       <div class="grid3 datagen-options">
         <div><label>目标表</label><input type="text" id="f-form-table" list="form-table-options" autocomplete="off" placeholder="输入关键字或选择数据表"><datalist id="form-table-options"></datalist></div>
         <div><label>INSERT 生成条数</label><input type="number" id="f-form-row-count" value="1" min="1" max="1000000"></div>
@@ -74,7 +78,7 @@
       <div class="variable-scroll"><table class="table metadata-table"><thead><tr><th>字段</th><th>类型/限制</th><th>生成方式</th><th>生成参数</th><th>样本比例</th><th>状态</th></tr></thead><tbody id="form-field-list"></tbody></table></div>
     </div>
 
-    <div id="panel-sql" style="display:none">
+    <div id="panel-sql"{% if mode != 'sql' %} style="display:none"{% endif %}>
       <div class="grid3 datagen-options">
         <div><label>INSERT 生成条数</label><input type="number" id="f-row-count" value="1" min="1" max="1000000"><span class="hint">每条 SQL 重复执行的次数</span></div>
       </div>
@@ -109,7 +113,26 @@
       </div>
     </div>
 
-    <div id="panel-shell" style="display:none">
+    <div id="panel-multi"{% if mode != 'multi' %} style="display:none"{% endif %}>
+      <div class="grid3 datagen-options">
+        <div><label>并发分组数</label><input type="number" id="f-multi-concurrency" value="4" min="1" max="16"><span class="hint">同时写入的最大表数（上限 16）</span></div>
+        <div><label>每条 SQL 重复次数</label><input type="number" id="f-multi-row-count" value="1" min="1" max="1000000"><span class="hint">留 1 表示按文件原样导入</span></div>
+        <div class="form-actions datagen-rule-actions"><button type="button" id="btn-analyze-multi" class="secondary">解析分组</button></div>
+      </div>
+      <textarea id="f-multi-sql" rows="12" placeholder="-- 多张表可以混写在同一个文件里，系统会按目标表自动分组&#10;INSERT INTO orders (uid, amount) VALUES (1, 10.5);&#10;INSERT INTO stock (sku, qty) VALUES ('SKU1', 5);"></textarea>
+      <p class="hint">按语句的目标表分组：同一张表的语句保持文件中原有顺序串行执行，不同表并发执行，单张表失败不会中断其他表。识别不出目标表的语句（SET、BEGIN 等）会先行串行执行。</p>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">上传 .sql 文件
+          <input type="file" id="f-multi-file" accept=".sql,.txt" hidden>
+        </label>
+      </div>
+      <div id="multi-analysis" class="hint">粘贴或上传 SQL 后点击“解析分组”，可先预览每张表的语句数。</div>
+      <div class="variable-scroll" id="multi-preview" style="display:none">
+        <table class="table"><thead><tr><th>分组</th><th>语句数</th></tr></thead><tbody id="multi-preview-body"></tbody></table>
+      </div>
+    </div>
+
+    <div id="panel-shell"{% if mode != 'shell' %} style="display:none"{% endif %}>
       <textarea id="f-script" rows="12" placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;# 通过 TARGET_DB_* 环境变量连接目标库"></textarea>
       <div class="form-actions">
         <label class="btn secondary file-btn">上传脚本
@@ -164,6 +187,8 @@
 
 <script>
 const LS_KEY = 'sqlpulse.datagen.form';
+// /datagen/multi 子栏目下由服务端指定初始模式，且页面上不渲染标签栏
+const INITIAL_MODE = {{ (initial_mode or '') | tojson }};
 const scriptEnabled = {{ 'true' if script_enabled else 'false' }};
 const maxSqlChars = {{ max_sql_chars }};
 const maxScriptChars = {{ max_script_chars }};
@@ -240,7 +265,10 @@ function renderDatagenVariables() {
     const c1=document.createElement('td');c1.append(name);const c2=document.createElement('td');c2.append(type);const c3=document.createElement('td');c3.append(params);tr.append(c1,c2,c3,ops);list.append(tr);
   });
 }
-function activeMode() { return document.querySelector('.tab[data-mode].active').dataset.mode; }
+function activeMode() {
+  const tab = document.querySelector('.tab[data-mode].active');
+  return tab ? tab.dataset.mode : (INITIAL_MODE || 'form');
+}
 function connMode() { return document.querySelector('.seg-btn[data-conn-mode].active').dataset.connMode; }
 function switchConnMode(mode) {
   document.querySelectorAll('.seg-btn[data-conn-mode]').forEach(b => {
@@ -261,6 +289,8 @@ function saveForm() {
     const payload = {
       name: $id('f-name').value, mode: activeMode(), row_count: +$id('f-row-count').value || 1,
       sql: $id('f-sql').value, script: $id('f-script').value,
+      multi_sql: $id('f-multi-sql').value,
+      multi_concurrency: +$id('f-multi-concurrency').value || 4,
       variables: datagenVariableText(),
       target_table: $id('f-target-table').value,
     };
@@ -285,11 +315,16 @@ function loadForm() {
       $id('f-database').value = saved.dsn.database ?? $id('f-database').value;
     }
     if (saved.sql) $id('f-sql').value = saved.sql;
+    if (saved.multi_sql) $id('f-multi-sql').value = saved.multi_sql;
+    if (saved.multi_concurrency) $id('f-multi-concurrency').value = saved.multi_concurrency;
     if (saved.row_count) $id('f-row-count').value = saved.row_count;
     if (saved.variables) loadDatagenVariables(saved.variables);
     if (saved.target_table) $id('f-target-table').value = saved.target_table;
     if (saved.script) $id('f-script').value = saved.script;
-    if (saved.mode === 'shell') switchMode('shell');
+    if (!INITIAL_MODE && saved.mode && document.querySelector('.tab[data-mode="' + saved.mode + '"]')) {
+      // 只恢复仍然存在对应标签的模式：multi 已迁到独立页面，这里会自动跳过
+      switchMode(saved.mode);
+    }
     if (saved.connection_id) {
       const select = $id('f-connection-id');
       if ([...select.options].some(o => o.value === saved.connection_id)) {
@@ -301,18 +336,21 @@ function loadForm() {
 }
 function switchMode(mode) {
   document.querySelectorAll('.tab[data-mode]').forEach(t => t.classList.remove('active'));
-  document.querySelector('.tab[data-mode="' + mode + '"]').classList.add('active');
+  const tab = document.querySelector('.tab[data-mode="' + mode + '"]');
+  if (tab) tab.classList.add('active');
   $id('panel-sql').style.display = mode === 'sql' ? '' : 'none';
   $id('panel-form').style.display = mode === 'form' ? '' : 'none';
+  $id('panel-multi').style.display = mode === 'multi' ? '' : 'none';
   $id('panel-shell').style.display = mode === 'shell' ? '' : 'none';
   if (mode === 'form') loadFormTableOptions($id('f-form-table').value.trim());
   saveForm();
 }
 document.querySelectorAll('.tab[data-mode]').forEach(t => t.addEventListener('click', () => switchMode(t.dataset.mode)));
-['f-name','f-connection-id','f-host','f-port','f-user','f-password','f-database','f-sql','f-script','f-row-count']
+['f-name','f-connection-id','f-host','f-port','f-user','f-password','f-database','f-sql','f-script','f-row-count','f-multi-concurrency','f-multi-row-count']
   .forEach(id => $id(id).addEventListener('change', saveForm));
 $id('f-target-table').addEventListener('change', saveForm);
 $id('f-sql').addEventListener('input', saveForm);
+$id('f-multi-sql').addEventListener('input', saveForm);
 datagenRememberEditor($id('f-sql'));
 $id('f-script').addEventListener('input', saveForm);
 $id('btn-add-datagen-variable').addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); datagenVariables.push({id:clientId(),name:'',type:'rand',args:['1','10000']}); renderDatagenVariables(); saveForm(); });
@@ -331,6 +369,44 @@ async function readFile(input, target, maxChars) {
 }
 $id('f-sql-file').addEventListener('change', e => readFile(e.target, 'f-sql', maxSqlChars));
 $id('f-script-file').addEventListener('change', e => readFile(e.target, 'f-script', maxScriptChars));
+$id('f-multi-file').addEventListener('change', async (e) => {
+  await readFile(e.target, 'f-multi-sql', maxSqlChars);
+  if (e.target.files.length) await analyzeMulti();
+});
+
+async function analyzeMulti() {
+  const hint = $id('multi-analysis'), body = $id('multi-preview-body');
+  const content = $id('f-multi-sql').value.trim();
+  if (!content) {
+    hint.textContent = '✗ 请先粘贴或上传 SQL'; hint.className = 'hint err';
+    $id('multi-preview').style.display = 'none'; return;
+  }
+  hint.textContent = '解析中...'; hint.className = 'hint';
+  try {
+    const resp = await fetch('/api/datagen/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
+    const data = await resp.json();
+    if (!resp.ok) throw Error(data.detail || '解析失败');
+    body.replaceChildren();
+    data.groups.forEach(group => {
+      const tr = document.createElement('tr');
+      [group.table, group.statements].forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); });
+      body.append(tr);
+    });
+    if (data.global_statements) {
+      const tr = document.createElement('tr');
+      ['无法识别目标表（先行串行执行）', data.global_statements].forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); });
+      body.append(tr);
+    }
+    $id('multi-preview').style.display = (data.groups.length || data.global_statements) ? '' : 'none';
+    hint.textContent = '✓ 共 ' + data.total_statements + ' 条语句，识别出 ' + data.groups.length + ' 张表'
+      + (data.global_statements ? '，另有 ' + data.global_statements + ' 条识别不出目标表' : '');
+    hint.className = 'hint ok';
+  } catch (err) {
+    hint.textContent = '✗ ' + err.message; hint.className = 'hint err';
+    $id('multi-preview').style.display = 'none';
+  }
+}
+$id('btn-analyze-multi').addEventListener('click', analyzeMulti);
 
 $id('btn-example-sql').addEventListener('click', async () => {
   const resp = await fetch('/static/examples/datagen.sql');
@@ -564,7 +640,9 @@ $id('datagen-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const hint = $id('submit-result');
   const mode = activeMode();
-  let content = mode === 'sql' ? $id('f-sql').value.trim() : mode === 'form' ? '' : $id('f-script').value.trim();
+  let content = mode === 'sql' ? $id('f-sql').value.trim()
+              : mode === 'multi' ? $id('f-multi-sql').value.trim()
+              : mode === 'form' ? '' : $id('f-script').value.trim();
   if (mode === 'form') { try { content = buildFormSql(); } catch (err) { hint.textContent='✗ '+err.message; hint.className='hint err'; return; } }
   if (!content) {
     hint.textContent = '✗ 造数内容为空'; hint.className = 'hint err'; return;
@@ -576,8 +654,11 @@ $id('datagen-form').addEventListener('submit', async (e) => {
   const body = {
     name: $id('f-name').value, mode: mode === 'form' ? 'sql' : mode, source: 'paste',
     content: content,
-    row_count: mode === 'sql' ? (+$id('f-row-count').value || 1) : mode === 'form' ? (+$id('f-form-row-count').value || 1) : 1,
+    row_count: mode === 'sql' ? (+$id('f-row-count').value || 1)
+              : mode === 'form' ? (+$id('f-form-row-count').value || 1)
+              : mode === 'multi' ? (+$id('f-multi-row-count').value || 1) : 1,
   };
+  if (mode === 'multi') body.concurrency = +$id('f-multi-concurrency').value || 4;
   if (mode === 'form') {
     body.target_table = $id('f-form-table').value.trim();
     body.field_rules = Object.values(formRules);
@@ -630,5 +711,6 @@ document.querySelectorAll('.stop-job').forEach(a => a.addEventListener('click', 
 
 renderDatagenVariables();
 loadForm();
+if (INITIAL_MODE) switchMode(INITIAL_MODE);
 </script>
 {% endblock %}

@@ -1,5 +1,7 @@
 import json
+import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from loguru import logger
@@ -8,11 +10,18 @@ from app import db
 from app.config import settings
 from app.services.runner import now_iso
 from app.services.script_runner import run_script_job
-from app.services.sql_executor import execute_sql_job, split_sql_statements
+from app.services.sql_executor import _log_line, execute_sql_job, split_sql_statements
+from app.services.sql_grouping import GLOBAL_GROUP, group_statements
 from app.services.sql_params import compile_statement, compile_variables
 from app.services.datagen_dependencies import build_dependency_plan, build_parent_insert
 from app.services.datagen_rules import read_table_metadata
 from app.services.credential_crypto import decrypt_dsn_snapshot
+
+
+def _table_log_path(log_path: Path, table: str) -> Path:
+    """多表并发时每个分组写各自的日志文件，避免行交错后无法按表定位问题。"""
+    name = "global" if table == GLOBAL_GROUP else re.sub(r"[^0-9A-Za-z_]+", "_", table).strip("_") or "table"
+    return log_path.with_name(f"{log_path.stem}__{name}{log_path.suffix}")
 
 
 class DataGenExecutor:
@@ -77,7 +86,10 @@ class DataGenExecutor:
             log_path = Path(job["log_path"]) if job.get("log_path") else settings.logs_dir / f"datagen_{job_id}.log"
             content = payload.get("content") or ""
 
-            if job["mode"] == "sql":
+            if job["mode"] == "multi":
+                (job_dir / "input.sql").write_text(content, encoding="utf-8")
+                status, rows, error = self._run_multi(job_id, dsn, payload, log_path, event)
+            elif job["mode"] == "sql":
                 (job_dir / "input.sql").write_text(content, encoding="utf-8")
                 statements = split_sql_statements(content)
                 definitions = compile_variables(payload.get("variables") or {})
@@ -146,8 +158,10 @@ class DataGenExecutor:
             fields = {"rows_affected": rows, "ended_at": now_iso()}
             if status == "cancelled":
                 fields["status"] = "cancelled"
-            elif status == "finished":
-                fields["status"] = "finished"
+            elif status in ("finished", "partial"):
+                fields["status"] = status
+                if error:
+                    fields["error_msg"] = error
             else:
                 fields["status"] = "failed"
                 fields["error_msg"] = error
@@ -162,6 +176,76 @@ class DataGenExecutor:
         finally:
             with self._lock:
                 self._cancel.pop(job_id, None)
+
+    def _run_multi(self, job_id: str, dsn: dict, payload: dict, log_path: Path,
+                   event: threading.Event) -> tuple:
+        """多表导入：按目标表分组，组内串行、组间并发；单组失败不影响其他分组。"""
+        statements = split_sql_statements(payload.get("content") or "")
+        if not statements:
+            return "failed", 0, "没有可执行的 SQL 语句"
+        definitions = compile_variables(payload.get("variables") or {})
+        compiled = [compile_statement(stmt, definitions, f"多表 SQL 第 {i} 条")
+                    for i, stmt in enumerate(statements, 1)]
+        groups = group_statements(compiled)
+        targets = [(table, items) for table, items in groups if table != GLOBAL_GROUP]
+        controls = next((items for table, items in groups if table == GLOBAL_GROUP), [])
+        if not targets:
+            return "failed", 0, "没有识别出任何目标表，多表导入至少需要一条能识别目标表的语句"
+
+        concurrency = max(1, min(int(payload.get("concurrency") or 4), len(targets),
+                                 settings.datagen_max_concurrency))
+        row_count = max(1, int(payload.get("row_count") or 1))
+        _log_line(log_path, f"[{job_id}] 多表模式：{len(statements)} 条语句 → {len(targets)} 个表分组，"
+                            f"并发度 {concurrency}，每条 SQL 重复 {row_count} 次")
+        if controls:
+            _log_line(log_path, f"[{job_id}] {len(controls)} 条语句无法识别目标表（SET/BEGIN 等），"
+                                f"将在独立连接中先行执行，不影响其他分组的会话")
+
+        results: dict = {}
+        lock = threading.Lock()
+
+        def run_group(table: str, items: list) -> None:
+            table_log = _table_log_path(log_path, table)
+            status, rows, error = execute_sql_job(
+                job_id, dsn, items, table_log, event, settings.datagen_sql_timeout_sec,
+                row_count=row_count, variable_definitions=definitions,
+                target_table=None if table == GLOBAL_GROUP else table,
+                unique_indexes=[],
+            )
+            with lock:
+                results[table] = {"status": status, "rows": rows or 0,
+                                  "error": error, "statements": len(items)}
+            _log_line(log_path, f"[{job_id}] {table} {status} 影响 {rows or 0} 行"
+                                + (f"，原因：{error}" if error else ""))
+
+        if controls and not event.is_set():
+            run_group(GLOBAL_GROUP, controls)
+
+        if not event.is_set():
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {pool.submit(run_group, table, items): table for table, items in targets}
+                for future in as_completed(futures):
+                    table = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        logger.exception("datagen multi group {} failed", table)
+                        with lock:
+                            results.setdefault(table, {"status": "failed", "rows": 0,
+                                                       "error": str(exc), "statements": 0})
+
+        rows_total = sum(item["rows"] for item in results.values())
+        if event.is_set():
+            _log_line(log_path, f"[{job_id}] 多表模式已取消：{len(results)} 个分组已结束，影响 {rows_total} 行")
+            return "cancelled", rows_total, None
+        failed = [(table, item) for table, item in sorted(results.items()) if item["status"] != "finished"]
+        if not failed:
+            _log_line(log_path, f"[{job_id}] 多表模式完成：{len(results)} 个分组全部成功，共影响 {rows_total} 行")
+            return "finished", rows_total, None
+        detail = "；".join(f"{table}: {item['error'] or item['status']}" for table, item in failed)
+        _log_line(log_path, f"[{job_id}] 多表模式结束：{len(results) - len(failed)} 个分组成功，"
+                            f"{len(failed)} 个分组失败")
+        return ("failed" if len(failed) == len(results) else "partial"), rows_total, detail[:1000]
 
 
 datagen_executor = DataGenExecutor()

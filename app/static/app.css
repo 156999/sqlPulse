@@ -10,6 +10,9 @@ code { background: #e5e7eb; padding: 1px 5px; border-radius: 3px; font-size: 0.9
 .sidebar nav { flex: 1; }
 .sidebar nav a { display: block; color: #d1d5db; padding: 10px 20px; }
 .sidebar nav a:hover, .sidebar nav a.active { background: #1f2937; color: #fff; text-decoration: none; }
+.sidebar nav a.nav-sub { position: relative; padding: 7px 20px 7px 38px; font-size: 13px; color: #9ca3af; }
+.sidebar nav a.nav-sub::before { content: ""; position: absolute; left: 26px; top: 0; bottom: 0; width: 1px; background: #374151; }
+.sidebar nav a.nav-sub:hover, .sidebar nav a.nav-sub.active { background: #1f2937; color: #fff; }
 .sidebar-foot { padding: 0 20px; font-size: 12px; color: #6b7280; }
 .sidebar-foot .user-box { padding: 10px 0 12px; border-top: 1px solid #1f2937; }
 .user-name { color: #e5e7eb; font-size: 13px; font-weight: 600; word-break: break-all; }
@@ -79,6 +82,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .badge-finished { background: #059669; }
 .badge-failed { background: #dc2626; }
 .badge-cancelled { background: #6b7280; }
+.badge-partial { background: #d97706; }
 
 .status-bar { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
 .status-bar button, .status-bar a { margin-left: auto; }

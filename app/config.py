@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     datagen_script_timeout_sec: int = 3600
     datagen_max_sql_chars: int = 5_000_000
     datagen_max_script_chars: int = 500_000
+    datagen_max_concurrency: int = 16
 
     # 压测结束后的 EXPLAIN 采集（只读、失败不影响报告，产物落 data/explain/）。
     # 名字里的 probe 是历史叫法 —— 2026-09-25 前它跑在"压测启动前"，见

@@ -65,6 +65,13 @@ EXPLAIN rows 是估计值；采集参数不是实际压测请求回放；计划�
 probe_ok 只表示采集流程整体是否走通，是否取得计划要看 collected / statement_status，
 两者不能混用。只提出后续检查和验证建议，不执行 SQL。没有足够证据时允许 findings 为空。
 不要把未传入或被裁剪的数据解释为正常；limitations 必须说明主要缺口。
+分段与序列：ramp/steady/tail 的形状对比是重要证据，"全程慢""爬坡期慢""后期劣化"必须先区分再归因。
+metrics_series 各字段聚合口径不同（mean 均值 / max 窗口最坏值 / sum 窗口总量），不可混用；
+p95_max/p99_max 是窗口内最大值，不是分位数平均。
+series 与 failures 的 offset 都以 started_at 为原点，可直接对齐时间关系。
+coverage 小于 1、gap_buckets 大于 0、missing_columns 非空时，相关结论必须降级或说明不确定性。
+失败明细（failures）的错误消息优先于 err_rate 数字：死锁、锁等待超时、语法错指向完全不同的方向；
+groups 为空表示零失败，failures 工具报错才代表明细缺失，两者不能混为一谈。
 """
 
 
@@ -100,17 +107,29 @@ def text_char_limit(max_tokens: int) -> int:
     return min(_MAX_TEXT_CHARS, max_tokens * _CHARS_PER_TOKEN)
 
 
-def collect_evidence(run_id, tool_registry=None, max_chars=30000):
-    """整条记录做预算：超预算的记录整条跳过，绝不裁剪 JSON 字符串。"""
+# Tier2 证据的装配顺序（预算不足时按此顺序丢弃）；Tier1 为决定性证据，必给
+_TIER2_ORDER = {"task_metrics": 0, "statement_plan": 1, "metrics_series": 2, "existing_l1": 3}
+
+
+def collect_evidence(run_id, tool_registry=None, max_chars=60000):
+    """分层预算装配：Tier1（run/task/summary/segments/failures/explain_status）必给，
+    Tier2 按剩余预算顺次填入；所有记录整条取舍，绝不裁剪 JSON 字符串。"""
     if tool_registry is None:
-        from app.ai.tools import get_run_context, get_run_metrics, get_run_explain
+        from app.ai.tools import (get_run_context, get_run_failures,
+                                  get_run_metrics, get_run_explain)
         tool_registry = {"context": get_run_context, "metrics": get_run_metrics,
-                         "explain": get_run_explain}
+                         "failures": get_run_failures, "explain": get_run_explain}
+    tier1: list = []
+    tier2: list = []
     evidence, warnings, states = [], [], {}
     used = 0
     omitted = 0
 
-    def add(kind, payload):
+    def add(kind, payload, tier=1):
+        (tier1 if tier == 1 else tier2).append((kind, payload))
+
+    def emit(kind, payload):
+        # 编号在最终装配时统一生成，保证与输出顺序一致
         nonlocal used, omitted
         item = {"id": f"E{len(evidence) + 1:03d}", "kind": kind, "data": payload}
         encoded = json.dumps(item, ensure_ascii=False, allow_nan=False)
@@ -120,7 +139,7 @@ def collect_evidence(run_id, tool_registry=None, max_chars=30000):
         evidence.append(item)
         used += len(encoded)
 
-    for name in ("context", "metrics", "explain"):
+    for name in ("context", "metrics", "failures", "explain"):
         try:
             result = tool_registry[name](run_id)
             if not isinstance(result, dict) or type(result.get("ok")) is not bool:
@@ -154,12 +173,20 @@ def collect_evidence(run_id, tool_registry=None, max_chars=30000):
                 add("metrics_summary", {k: data.get(k) for k in
                     ("summary", "summary_sources", "field_notes", "missing",
                      "in_progress", "data_available")})
+                if data.get("segments"):
+                    add("metrics_segments", {"segments": data["segments"]})
                 per = data.get("per_sql") or {}
                 for sql_id, item in list(per.items())[:30]:
-                    add("task_metrics", {"sql_id": sql_id, "metrics": item})
+                    add("task_metrics", {"sql_id": sql_id, "metrics": item}, tier=2)
                 omitted += max(0, len(per) - 30)
+                if data.get("series"):
+                    add("metrics_series", {"series": data["series"]}, tier=2)
                 if data.get("l1_findings"):
-                    add("existing_l1", data["l1_findings"])
+                    add("existing_l1", data["l1_findings"], tier=2)
+            elif name == "failures":
+                add("failures", {k: data.get(k) for k in
+                    ("available", "total_failures", "group_count", "groups",
+                     "exceptions", "field_notes")})
             else:
                 # probe_ok 是产物顶层流程状态（采集有没有走通）；是否取得计划看
                 # collected / statement_status。summary 直接取产物已有聚合，不重算。
@@ -169,12 +196,17 @@ def collect_evidence(run_id, tool_registry=None, max_chars=30000):
                 for task in data.get("tasks") or []:
                     for index, statement in enumerate(task.get("statements") or []):
                         add("statement_plan", {"sql_id": task.get("sql_id"), "statement_index": index,
-                            **{k: statement.get(k) for k in ("original", "ok", "plan", "findings")}})
+                            **{k: statement.get(k) for k in ("original", "ok", "plan", "findings")}},
+                            tier=2)
         except Exception as exc:
             states[name] = _state(False, "TOOL_CONTRACT_ERROR")
             warnings.append(f"{name}: TOOL_CONTRACT_ERROR ({type(exc).__name__})")
             if name == "context":
                 return None, warnings, states
+    for kind, payload in tier1:
+        emit(kind, payload)
+    for kind, payload in sorted(tier2, key=lambda item: _TIER2_ORDER.get(item[0], 9)):
+        emit(kind, payload)
     if omitted:
         warnings.append(f"证据预算限制：省略 {omitted} 条记录，不能视为全面诊断")
     return evidence, warnings, states

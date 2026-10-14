@@ -1,12 +1,13 @@
 """SQLPulse 只读诊断工具验证入口（PASS / WARN / FAIL）。
 
 用法：
-    python -m app.ai.verify_ai_tools --run-id <任务ID> [--tool context|metrics|explain|table_profile]
+    python -m app.ai.verify_ai_tools --run-id <任务ID>
+                                     [--tool context|metrics|failures|explain|table_profile]
                                      [--table 表名] [--data-dir DIR] [--verbose]
 
 - --run-id   必填：8 位十六进制任务 ID（仓库真实规则：uuid4().hex[:8]，如 bb01ea65），
              传入值原样交给工具，大小写/首尾空格由工具自己归一化。
-- --tool     可选：只验证单个工具；缺省验证 context / metrics / explain 三个。
+- --tool     可选：只验证单个工具；缺省验证 context / metrics / failures / explain 四个。
 - --table    可选：目标库表名；给出时会额外验证 get_table_profile。
              这是本入口唯一会**连接目标 MySQL** 的检查（工具侧还要求 AI_DB_PROBE_ENABLED
              已开启，否则只会得到 DB_PROBE_DISABLED）。
@@ -58,6 +59,7 @@ _ERROR_LEVEL = {
     "RUN_NOT_FOUND": FAIL, "INVALID_RUN_ID": FAIL, "DATA_INVALID": FAIL,
     "DATA_UNAVAILABLE": FAIL, "TOOL_INTERNAL_ERROR": FAIL, "EXPLAIN_CORRUPT": FAIL,
     "EXPLAIN_NOT_READY": WARN, "EXPLAIN_NOT_AVAILABLE": WARN,
+    "FAILURES_NOT_READY": WARN, "FAILURES_NOT_AVAILABLE": WARN,
     # 目标库元数据：能力未开或目标库侧不可用都算"工具正确报告状态"，
     # 但表是用户点名要看的，找不到就是失败。
     "DB_PROBE_DISABLED": WARN, "DB_CONNECT_FAILED": WARN, "DB_TIMEOUT": WARN,
@@ -250,7 +252,7 @@ def _check_numbers(checks: list, label: str, holder: dict, counts, nums, rates) 
     return True
 
 
-def check_metrics(checks: list, data: dict) -> dict:
+def check_metrics(checks: list, data: dict, db_path: Path) -> dict:
     summary, sources = data.get("summary"), data.get("summary_sources")
     if not isinstance(summary, dict) or not isinstance(sources, dict):
         _c(checks, "metrics.summary", FAIL, "summary 或 summary_sources 不是对象")
@@ -313,9 +315,245 @@ def check_metrics(checks: list, data: dict) -> dict:
         if per_sql:
             _c(checks, "metrics.per_sql", PASS, f"{len(per_sql)} 个任务组：{', '.join(sorted(per_sql))}")
 
+    check_series(checks, data, db_path)
+    check_segments(checks, data)
+
     if data.get("in_progress"):
         _c(checks, "metrics.in_progress", WARN, "任务未结束，读到的是一次快照")
     return data
+
+
+# 时序证据（series/segments）的约定口径与字段集合（与 tools.py 保持一致）
+_SERIES_FIELDS = ("qps", "p95_ms", "p99_ms", "err_rate", "threads_running",
+                  "threads_connected", "mysql_qps", "slow_inc", "lock_waits_inc",
+                  "tmp_disk_inc", "bufpool_hit")
+_SERIES_AGG = {
+    "qps": "mean", "p95_ms": "max", "p99_ms": "max", "err_rate": "mean",
+    "threads_running": "mean", "threads_connected": "max", "mysql_qps": "mean",
+    "slow_inc": "sum", "lock_waits_inc": "sum", "tmp_disk_inc": "sum",
+    "bufpool_hit": "mean",
+}
+_SEGMENT_NAMES = ("ramp", "steady", "tail")
+_CRED_RE = re.compile(r"(?i)(password|passwd|pwd)\s*[=:]\s*\S+")
+
+
+def _count_metrics(db_path: Path, run_id) -> Optional[int]:
+    """只读统计 metrics 表原始点数，用于交叉核对降采样标志。"""
+    if not db_path.is_file() or not isinstance(run_id, str):
+        return None
+    uri = f"file:{urllib.parse.quote(str(db_path))}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM metrics WHERE run_id=?", (run_id,)).fetchone()
+        return int(row[0]) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _check_number_list(checks: list, label: str, name: str, values) -> bool:
+    if not isinstance(values, list):
+        _c(checks, label, FAIL, f"{name} 不是列表")
+        return False
+    for index, value in enumerate(values):
+        if value is not None and not _is_num(value):
+            _c(checks, label, FAIL, f"{name}[{index}]={value!r} 不是有限数字或 null")
+            return False
+    return True
+
+
+def check_series(checks: list, data: dict, db_path: Path) -> None:
+    series = data.get("series")
+    if series is None:
+        _c(checks, "metrics.series", WARN, "无逐秒序列（metrics 为空或任务无采样）")
+        return
+    if not isinstance(series, dict):
+        _c(checks, "metrics.series", FAIL, "series 必须是对象或 null")
+        return
+    offsets = series.get("offsets_sec")
+    if not isinstance(offsets, list) or not offsets:
+        _c(checks, "metrics.series", FAIL, "offsets_sec 必须是非空列表")
+        return
+    if any(not _is_num(o) for o in offsets) or any(b <= a for a, b in zip(offsets, offsets[1:])):
+        _c(checks, "metrics.series", FAIL, "offsets_sec 必须是严格递增的有限数字")
+        return
+    points = series.get("points")
+    if not _is_count(points) or points != len(offsets):
+        _c(checks, "metrics.series", FAIL, f"points={points!r} 与 offsets 长度 {len(offsets)} 不一致")
+        return
+    if points > 60:
+        _c(checks, "metrics.series", FAIL, f"降采样后仍超过 60 点：{points}")
+        return
+
+    aggregation = series.get("aggregation")
+    if not isinstance(aggregation, dict) or set(aggregation) != set(_SERIES_AGG):
+        _c(checks, "metrics.series.aggregation", FAIL, f"aggregation 字段集合不符：{aggregation}")
+    else:
+        mismatched = [k for k, how in aggregation.items() if _SERIES_AGG[k] != how]
+        if mismatched:
+            _c(checks, "metrics.series.aggregation", FAIL, f"聚合口径与约定不符：{mismatched}")
+        else:
+            _c(checks, "metrics.series.aggregation", PASS, "mean/max/sum 口径与约定一致")
+
+    missing = series.get("missing_columns")
+    if not isinstance(missing, list) or any(not isinstance(m, str) for m in missing):
+        _c(checks, "metrics.series.missing_columns", FAIL, "missing_columns 必须是字符串列表")
+        return
+    present = [f for f in _SERIES_FIELDS if f in series]
+    for field in present:
+        if not _check_number_list(checks, f"metrics.series.{field}", field, series[field]):
+            return
+        if len(series[field]) != points:
+            _c(checks, f"metrics.series.{field}", FAIL,
+               f"{field} 长度 {len(series[field])} 与 points={points} 不一致")
+            return
+    if set(present) != set(_SERIES_FIELDS) - set(missing):
+        _c(checks, "metrics.series.columns", FAIL, "输出列与 missing_columns 不自洽")
+    else:
+        _c(checks, "metrics.series.columns", PASS,
+           f"{len(present)} 列 × {points} 点；缺失列：{', '.join(missing) or '无'}")
+
+    raw = _count_metrics(db_path, data.get("run_id"))
+    samples = series.get("samples")
+    if raw is None:
+        _c(checks, "metrics.series.source", WARN, "无法读取 metrics 表核对原始点数")
+    elif samples != raw:
+        _c(checks, "metrics.series.source", FAIL,
+           f"samples={samples!r} 与库中原始点数 {raw} 不一致")
+    elif (raw > 60) != bool(series.get("downsampled")):
+        _c(checks, "metrics.series.source", FAIL,
+           f"库里 {raw} 点与 downsampled={series.get('downsampled')!r} 不一致")
+    else:
+        _c(checks, "metrics.series.source", PASS,
+           f"库中 {raw} 点 → 输出 {points} 点（downsampled={bool(series.get('downsampled'))}）")
+
+    gaps = series.get("gap_buckets")
+    coverage = series.get("coverage")
+    if _is_count(gaps) and gaps > 0:
+        _c(checks, "metrics.series.coverage", WARN, f"{gaps} 个空桶（采样有空洞），coverage={coverage}")
+    elif coverage is not None and not _is_rate(coverage):
+        _c(checks, "metrics.series.coverage", FAIL, f"coverage 越界：{coverage!r}")
+    else:
+        _c(checks, "metrics.series.coverage", PASS, "无空桶")
+
+
+def check_segments(checks: list, data: dict) -> None:
+    segments = data.get("segments")
+    if segments is None:
+        _c(checks, "metrics.segments", WARN, "未分段（采样过少或任务过短，详见 warnings）")
+        return
+    if not isinstance(segments, list) or not segments:
+        _c(checks, "metrics.segments", FAIL, "segments 必须是非空列表或 null")
+        return
+    if any(not isinstance(s, dict) for s in segments):
+        _c(checks, "metrics.segments", FAIL, "段必须是对象")
+        return
+    names = [s.get("name") for s in segments]
+    if any(n not in _SEGMENT_NAMES for n in names) or names[-1] != "tail" \
+            or names[0] not in ("ramp", "steady") or len(set(names)) != len(names):
+        _c(checks, "metrics.segments", FAIL, f"段名/段序不符：{names}")
+        return
+    windows = [s.get("window_sec") for s in segments]
+    if any(not isinstance(w, list) or len(w) != 2 or not _is_num(w[0]) or not _is_num(w[1])
+           or w[0] >= w[1] for w in windows):
+        _c(checks, "metrics.segments", FAIL, "window_sec 必须是 [起, 止] 且起<止")
+        return
+    if any(abs(windows[i][1] - windows[i + 1][0]) > 0.5 for i in range(len(windows) - 1)):
+        _c(checks, "metrics.segments", FAIL, "各段窗口不连续")
+        return
+    for segment in segments:
+        if not _is_count(segment.get("samples")) or segment["samples"] <= 0:
+            _c(checks, "metrics.segments", FAIL, f"{segment.get('name')} 段 samples 必须为正整数")
+            return
+        for key, value in segment.items():
+            if key.endswith(("_mean", "_max", "_sum")) and value is not None and not _is_num(value):
+                _c(checks, "metrics.segments", FAIL, f"{segment.get('name')}.{key}={value!r} 类型不符")
+                return
+    _c(checks, "metrics.segments", PASS,
+       "；".join(f"{s['name']}[{s['window_sec'][0]}~{s['window_sec'][1]}s] samples={s['samples']}"
+                 for s in segments))
+
+
+def check_failures(checks: list, data: dict) -> None:
+    if data.get("available") is not True:
+        _c(checks, "failures.available", FAIL, "available 必须为 true（不可用应以错误信封返回）")
+        return
+    total = data.get("total_failures")
+    if not _is_count(total):
+        _c(checks, "failures.total", FAIL, "total_failures 必须是非负整数")
+        return
+    groups = data.get("groups")
+    if not isinstance(groups, list) or len(groups) > 10:
+        _c(checks, "failures.groups", FAIL, "groups 必须是 ≤10 条的列表")
+        return
+    if not data.get("source") or not isinstance(data.get("source"), str):
+        _c(checks, "failures.source", FAIL, "source 必须是非空字符串")
+
+    if total == 0:
+        if groups:
+            _c(checks, "failures.groups", FAIL, "total_failures=0 却给出了分组")
+        else:
+            _c(checks, "failures.groups", PASS, "零失败（文件存在、无记录）")
+    elif not groups:
+        _c(checks, "failures.groups", FAIL, "total_failures>0 却没有分组")
+        return
+    else:
+        occurrences = 0
+        for g in groups:
+            if not isinstance(g, dict) or not _is_count(g.get("occurrences")) \
+                    or g["occurrences"] <= 0:
+                _c(checks, "failures.groups", FAIL, f"occurrences 非法：{g!r}")
+                return
+            occurrences += g["occurrences"]
+            message = g.get("error")
+            if message is not None and not isinstance(message, str):
+                _c(checks, "failures.groups", FAIL, "error 必须是字符串或 null")
+                return
+            if isinstance(message, str):
+                if len(message) > 300:
+                    _c(checks, "failures.groups", FAIL, f"错误消息超过 300 字符（{len(message)}）")
+                    return
+                if _CRED_RE.search(message):
+                    _c(checks, "failures.groups", FAIL, "错误消息疑似包含凭据")
+                    return
+            share = g.get("share")
+            if share is not None:
+                if not _is_rate(share):
+                    _c(checks, "failures.groups", FAIL, f"share 必须在 0~1：{share!r}")
+                    return
+                if abs(share - g["occurrences"] / total) > 1e-3:
+                    _c(checks, "failures.groups", FAIL,
+                       f"share={share} 与占比 {g['occurrences'] / total:.4f} 不符")
+                    return
+            for key in ("first_offset_sec", "last_offset_sec"):
+                value = g.get(key)
+                if value is not None and not _is_count(value):
+                    _c(checks, "failures.groups", FAIL, f"{key} 必须是非负整数或 null")
+                    return
+        if occurrences > total:
+            _c(checks, "failures.total", FAIL, f"分组合计 {occurrences} 超过 total_failures {total}")
+            return
+        _c(checks, "failures.groups", PASS,
+           f"{len(groups)} 组（展示合计 {occurrences}/{total} 次）；"
+           f"首组：{(groups[0].get('error') or '')[:60]}")
+
+    exceptions = data.get("exceptions")
+    if not isinstance(exceptions, list) or len(exceptions) > 5:
+        _c(checks, "failures.exceptions", FAIL, "exceptions 必须是 ≤5 条的列表")
+        return
+    for item in exceptions:
+        if not isinstance(item, dict) or not isinstance(item.get("message"), str) \
+                or not _is_count(item.get("count")):
+            _c(checks, "failures.exceptions", FAIL, "异常条目缺少 message/count 或类型不符")
+            return
+        if _CRED_RE.search(item["message"]):
+            _c(checks, "failures.exceptions", FAIL, "异常消息疑似包含凭据")
+            return
+    _c(checks, "failures.exceptions", PASS, f"{len(exceptions)} 条异常消息")
 
 
 def check_explain(checks: list, data: dict) -> None:
@@ -557,15 +795,20 @@ def check_sql_ids(checks: list, results: dict) -> None:
         data = result.get("data") or {}
         if name == "metrics":
             return set((data.get("per_sql") or {}).keys())
+        if name == "failures":
+            # 失败明细的 sql_id 来自 locust Name 列；零失败时无数据可核对
+            ids = {g.get("sql_id") for g in (data.get("groups") or []) if isinstance(g, dict)}
+            ids = {i for i in ids if isinstance(i, str) and re.fullmatch(r"sql_\d+", i)}
+            return ids or None
         return {t.get("sql_id") for t in (data.get("tasks") or []) if isinstance(t, dict)}
 
     ctx = ids_of("context")
     if ctx is None:
         return
-    for name in ("metrics", "explain"):
+    for name in ("metrics", "explain", "failures"):
         other = ids_of(name)
         if other is None:
-            _c(checks, f"ids.context/{name}", WARN, f"{name} 未成功返回，未能核对 sql_id")
+            _c(checks, f"ids.context/{name}", WARN, f"{name} 无可用数据或未成功返回，未能核对 sql_id")
             continue
         unknown = sorted(other - ctx)
         missing = sorted(ctx - other)
@@ -584,15 +827,16 @@ def check_sql_ids(checks: list, results: dict) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.ai.verify_ai_tools",
-        description="验证三个只读诊断工具：结构、字段语义、run_id 归一化与缺失场景",
+        description="验证只读诊断工具：结构、字段语义、时序/分段/失败明细、run_id 归一化与缺失场景",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="退出码：0=无 FAIL；1=有 FAIL；2=环境/依赖错误",
     )
     parser.add_argument("--run-id", required=True, metavar="RUN_ID",
                         help="8 位十六进制任务 ID（如 bb01ea65）")
-    parser.add_argument("--tool", choices=("context", "metrics", "explain", "table_profile"),
+    parser.add_argument("--tool",
+                        choices=("context", "metrics", "failures", "explain", "table_profile"),
                         default=None,
-                        help="只验证一个工具；缺省验证 context/metrics/explain 三个")
+                        help="只验证一个工具；缺省验证 context/metrics/failures/explain 四个")
     parser.add_argument("--table", metavar="TABLE", default=None,
                         help="目标库表名；给出时额外验证 get_table_profile（会连目标库）")
     parser.add_argument("--data-dir", metavar="DIR", default=None,
@@ -613,8 +857,8 @@ def main(argv=None) -> int:
     checks: list = []
     profile_degraded: list = []
     try:
-        from app.ai.tools import (get_run_context, get_run_explain, get_run_metrics,
-                                  get_table_profile)
+        from app.ai.tools import (get_run_context, get_run_explain, get_run_failures,
+                                  get_run_metrics, get_table_profile)
         from app.config import settings
     except Exception as e:
         payload = {"run_id_input": args.run_id, "data_dir": args.data_dir,
@@ -625,13 +869,15 @@ def main(argv=None) -> int:
         print("退出码 2：环境/依赖错误", file=sys.stderr)
         return 2
 
-    tools = {"context": get_run_context, "metrics": get_run_metrics, "explain": get_run_explain,
+    tools = {"context": get_run_context, "metrics": get_run_metrics,
+             "failures": get_run_failures, "explain": get_run_explain,
              "table_profile": lambda rid: get_table_profile(rid, args.table)}
-    requested = [args.tool] if args.tool else ["context", "metrics", "explain"]
+    requested = [args.tool] if args.tool else ["context", "metrics", "failures", "explain"]
     if args.table and "table_profile" not in requested:
         requested.append("table_profile")
     normalized = args.run_id.strip().lower()
     valid = bool(re.fullmatch(r"[0-9a-f]{8}", normalized))
+    db_path = Path(settings.data_dir) / "sqlpulse.db"
 
     results: dict = {}
     if not valid:
@@ -653,7 +899,9 @@ def main(argv=None) -> int:
                 if name == "context":
                     check_context(checks, data)
                 elif name == "metrics":
-                    check_metrics(checks, data)
+                    check_metrics(checks, data, db_path)
+                elif name == "failures":
+                    check_failures(checks, data)
                 elif name == "table_profile":
                     check_table_profile(checks, data, args.table)
                 else:
@@ -676,9 +924,8 @@ def main(argv=None) -> int:
         check_sql_ids(checks, results)
 
     check_invalid_id(checks, tools, requested)
-    check_absent_id(checks, tools, requested, Path(settings.data_dir) / "sqlpulse.db")
+    check_absent_id(checks, tools, requested, db_path)
 
-    db_path = Path(settings.data_dir) / "sqlpulse.db"
     payload = {
         "run_id_input": args.run_id,
         "normalized_run_id": normalized if valid else None,

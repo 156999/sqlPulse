@@ -1,19 +1,22 @@
 """SQLPulse 只读诊断工具。
 
-前三个工具（``get_run_context`` / ``get_run_metrics`` / ``get_run_explain``）只读平台数据：
-平台 SQLite、Locust CSV 与 EXPLAIN 产物，**不连目标 MySQL**。
+前四个工具（``get_run_context`` / ``get_run_metrics`` / ``get_run_failures`` /
+``get_run_explain``）只读平台数据：平台 SQLite（含逐秒采样的 metrics 表）、
+Locust CSV 与 EXPLAIN 产物，**不连目标 MySQL**。
 ``get_table_profile`` 是唯一例外：按需只读目标库的元数据（列 / 索引 / 表规模估算），
 必须显式开启 ``AI_DB_PROBE_ENABLED``，且连接只从 run 快照解析、不接受外部指定。
 
 公共约束：只读、不写文件与库、run_id 校验挡路径穿越、统一信封
 ``{ok, run_id, data, warnings, error}``，错误对象 ``{code, message, retryable}``。
 """
+import csv
 import json
 import math
 import re
 import sqlite3
 import urllib.parse
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Optional
 
 from app.ai import db_profile
@@ -313,10 +316,196 @@ def _stats_fields(row):
     return result
 
 
-def get_run_metrics(run_id: str) -> dict:
-    """读取累计 stats.csv 与已有报告；不生成报告、不重新采集。
+# --- 时序证据：逐秒采样（metrics 表）的降采样与分段 ---------------------------
+# 采集侧（collector）在压测期间每秒写入一行；这里只在读取时聚合，不改采集与存储。
+# 聚合口径按字段性质区分（级别 mean / 尖峰敏感 max / 增量 sum），禁止混用。
 
-    stats.csv 提供请求统计；报告提供已计算的采样摘要及 L1。
+_SERIES_MAX_POINTS = 60
+# (字段, 聚合方式, 小数位)
+_SERIES_COLUMNS = (
+    ("qps", "mean", 1),
+    ("p95_ms", "max", 1),
+    ("p99_ms", "max", 1),
+    ("err_rate", "mean", 4),
+    ("threads_running", "mean", 0),
+    ("threads_connected", "max", 0),
+    ("mysql_qps", "mean", 1),
+    ("slow_inc", "sum", 0),
+    ("lock_waits_inc", "sum", 0),
+    ("tmp_disk_inc", "sum", 0),
+    ("bufpool_hit", "mean", 3),
+)
+
+# 分段：爬坡段（并发/爬坡速率）上限占比、尾段占比、稳定段最低占比
+_SEGMENT_RAMP_MAX_SHARE = 0.15
+_SEGMENT_TAIL_SHARE = 0.10
+_SEGMENT_MIN_STEADY_SHARE = 0.20
+# (源字段, 输出字段名, 聚合方式, 小数位)：输出名带口径后缀，避免被当成同一种值
+_SEGMENT_FIELDS = (
+    ("qps", "qps_mean", "mean", 1),
+    ("p95_ms", "p95_max", "max", 1),
+    ("p99_ms", "p99_max", "max", 1),
+    ("err_rate", "err_rate_mean", "mean", 4),
+    ("threads_running", "threads_running_mean", "mean", 0),
+    ("threads_connected", "threads_connected_max", "max", 0),
+    ("slow_inc", "slow_inc_sum", "sum", 0),
+    ("lock_waits_inc", "lock_waits_inc_sum", "sum", 0),
+    ("tmp_disk_inc", "tmp_disk_inc_sum", "sum", 0),
+    ("bufpool_hit", "bufpool_hit_mean", "mean", 3),
+)
+
+
+def _epoch_seconds(iso_text) -> Optional[float]:
+    """started_at（本地时间 ISO 字符串）→ epoch 秒；解析失败返回 None。"""
+    if not isinstance(iso_text, str) or not iso_text:
+        return None
+    try:
+        return datetime.fromisoformat(iso_text).timestamp()
+    except ValueError:
+        return None
+
+
+def _rounded(value: float, digits: int):
+    return int(round(value)) if digits == 0 else round(value, digits)
+
+
+def _aggregate(values, how: str, digits: int):
+    numbers = [v for v in values if v is not None]
+    if not numbers:
+        return None
+    if how == "sum":
+        result = sum(numbers)
+    elif how == "max":
+        result = max(numbers)
+    else:
+        result = sum(numbers) / len(numbers)
+    return _rounded(result, digits)
+
+
+def _point_value(point: dict, key: str) -> Optional[float]:
+    value = point.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _series_payload(points: list, started_at) -> Optional[dict]:
+    """原始采样点 → 降采样序列（≤ _SERIES_MAX_POINTS 点，列式数组）。
+
+    >60 点时按 ts 时间等分桶（采样间隔不保证 1 秒，不能按索引等分）；
+    空桶输出 null 并计入 gap_buckets；整列全空时删除该列并列入 missing_columns。
+    """
+    if not points:
+        return None
+    t0 = _epoch_seconds(started_at)
+    used_fallback_t0 = t0 is None
+    if t0 is None:
+        t0 = float(points[0]["ts"])  # 兜底：以首个采样点为原点
+    offsets = [max(0.0, float(p["ts"]) - t0) for p in points]
+    samples = len(points)
+    downsampled = samples > _SERIES_MAX_POINTS
+    bucket_sec = None
+    if downsampled:
+        base = offsets[0]
+        span = offsets[-1] - base
+        if span > 0:
+            bucket_sec = span / (_SERIES_MAX_POINTS - 1)
+            bucket_count = int(span // bucket_sec) + 1
+            groups: list = [[] for _ in range(bucket_count)]
+            for offset, point in zip(offsets, points):
+                groups[int((offset - base) // bucket_sec)].append(point)
+            out_offsets = [round(base + bucket_sec * i, 1) for i in range(bucket_count)]
+        else:
+            downsampled = False  # 所有点同一时刻（异常数据）：退化为原样
+    if not downsampled:
+        groups = [[point] for point in points]
+        out_offsets = [round(offset, 1) for offset in offsets]
+
+    columns = {}
+    missing = []
+    for key, how, digits in _SERIES_COLUMNS:
+        values = [_aggregate([_point_value(p, key) for p in group], how, digits)
+                  for group in groups]
+        if all(v is None for v in values):
+            missing.append(key)
+        else:
+            columns[key] = values
+
+    gaps = sum(1 for group in groups if not group) if downsampled else 0
+    deltas = [b - a for a, b in zip(offsets, offsets[1:])]
+    payload = {
+        "t0": started_at if not used_fallback_t0 else None,
+        "samples": samples,
+        "points": len(groups),
+        "downsampled": downsampled,
+        "bucket_sec": round(bucket_sec, 2) if bucket_sec else None,
+        "gap_buckets": gaps,
+        "coverage": round(1 - gaps / len(groups), 3) if downsampled and groups else None,
+        "max_gap_sec": int(round(max(deltas))) if deltas else 0,
+        "aggregation": {key: how for key, how, _ in _SERIES_COLUMNS},
+        "missing_columns": missing,
+        "offsets_sec": out_offsets,
+        **columns,
+    }
+    return payload
+
+
+def _segments_payload(points: list, run: dict, started_at) -> tuple:
+    """按爬坡/稳定/尾段切分（用实际数据窗口）。返回 (segments|None, note|None)。
+
+    只给事实（各段聚合值），"哪段劣化"由模型自己比较得出。
+    """
+    if len(points) < 3:
+        return None, "采样点过少（<3），未做分段"
+    t0 = _epoch_seconds(started_at)
+    if t0 is None:
+        t0 = float(points[0]["ts"])
+    offsets = [max(0.0, float(p["ts"]) - t0) for p in points]
+    total = offsets[-1]
+    if total <= 0:
+        return None, "采样窗口过短，未做分段"
+    try:
+        ramp = min(math.ceil(run["concurrency"] / run["spawn_rate"]),
+                   total * _SEGMENT_RAMP_MAX_SHARE)
+    except (TypeError, ZeroDivisionError, KeyError):
+        ramp = 0.0
+    tail = total * _SEGMENT_TAIL_SHARE
+    steady = total - ramp - tail
+    if steady < total * _SEGMENT_MIN_STEADY_SHARE:
+        return None, f"任务时长约 {total:.0f}s 过短（或爬坡占比过大），未做分段"
+
+    edges = [0.0]
+    names = []
+    if ramp >= 1.0:
+        edges.append(ramp)
+        names.append("ramp")
+    edges += [total - tail, total]
+    names += ["steady", "tail"]
+
+    segments = []
+    for index, name in enumerate(names):
+        lo, hi = edges[index], edges[index + 1]
+        last = index == len(names) - 1
+        subset = [p for p, o in zip(points, offsets)
+                  if (lo <= o <= hi if last else lo <= o < hi)]
+        entry = {"name": name,
+                 "window_sec": [round(lo, 1), round(hi, 1)],
+                 "samples": len(subset)}
+        if subset:
+            for key, out_key, how, digits in _SEGMENT_FIELDS:
+                value = _aggregate([_point_value(p, key) for p in subset], how, digits)
+                if value is not None:
+                    entry[out_key] = value
+        segments.append(entry)
+    return segments, None
+
+
+def get_run_metrics(run_id: str) -> dict:
+    """读取累计 stats.csv、逐秒采样与已有报告；不生成报告、不重新采集。
+
+    stats.csv 提供请求统计；metrics 表提供逐秒时序（降采样为 series、分窗口为
+    segments）；报告提供已计算的采样摘要及 L1。
     CSV 缺失时不将旧报告中可能由缺失默认生成的零计数当作证据。
     """
     def _metrics(run_id):
@@ -329,6 +518,13 @@ def get_run_metrics(run_id: str) -> dict:
                 "SELECT l0_json, l1_json, created_at FROM reports WHERE run_id=?",
                 (run_id,),
             ).fetchone()
+            metric_rows = conn.execute(
+                "SELECT ts, qps, p95_ms, p99_ms, err_rate, threads_running,"
+                " threads_connected, mysql_qps, slow_inc, lock_waits_inc,"
+                " tmp_disk_inc, bufpool_hit"
+                " FROM metrics WHERE run_id=? ORDER BY ts",
+                (run_id,),
+            ).fetchall()
         l0, l1, report_time = {}, None, None
         if row:
             try:
@@ -363,13 +559,24 @@ def get_run_metrics(run_id: str) -> dict:
             warnings.append("尚无已保存报告；采样汇总和 L1 暂不可用")
         in_progress = run["status"] in ("pending", "running")
         if in_progress:
-            warnings.append("运行中数据是读取时快照，CSV 与报告可能来自不同时间")
+            warnings.append("运行中数据是读取时快照，CSV、时序与报告可能来自不同时间")
         warnings.append("已有报告的增量合计可能把真实零写成 null；本工具保留该缺失状态")
+
+        points = [dict(r) for r in metric_rows]
+        series = _series_payload(points, run.get("started_at"))
+        segments, segment_note = _segments_payload(points, run, run.get("started_at"))
+        if not points:
+            warnings.append("无逐秒采样（metrics 为空：采集未运行、平台重启或历史任务），"
+                            "series 与 segments 不可用，仅累计统计可参考")
+        if segment_note:
+            warnings.append(segment_note)
+
         return _ok(run_id, {
             "run_id": run_id, "status": run["status"], "in_progress": in_progress,
-            "data_available": aggregate is not None or bool(per_sql) or bool(l0),
+            "data_available": aggregate is not None or bool(per_sql) or bool(l0) or bool(points),
             "summary": summary, "summary_sources": sources,
             "per_sql": per_sql, "per_sql_source": "locust_stats_csv",
+            "series": series, "segments": segments,
             "l1_findings": l1, "report_created_at": report_time,
             "missing": [key for key, value in summary.items() if value is None],
             "field_notes": {
@@ -379,6 +586,13 @@ def get_run_metrics(run_id: str) -> dict:
                 "qps_avg": "已有报告中的采样请求速率算术平均",
                 "mysql": "实例级增量，不能直接归因于本次压测或某条 SQL",
                 "l1_findings": "已有规则结果，仅作为诊断输入，不等同确定根因",
+                "series": "逐秒采样的降采样序列（列式数组，最多 60 点）；各字段聚合口径见 "
+                          "aggregation：mean=窗口均值、max=窗口内最坏值、sum=窗口内总量，"
+                          "三者的含义不同，不可混用；p95_ms/p99_ms 是窗口最大值，不是分位数平均",
+                "series_offsets": "offsets_sec 相对 started_at（t0），可与 failures 的 "
+                                  "offset 字段直接对齐；coverage<1 或 gap_buckets>0 表示采样有空洞",
+                "segments": "按爬坡/稳定/尾段切分的窗口摘要，字段名自带口径后缀（_mean/_max/_sum）；"
+                            "未分段时 segments 为 null 并给出说明。哪段劣化需要模型自行比较",
             },
         }, warnings)
     normalized = _norm_run_id(run_id)
@@ -388,7 +602,174 @@ def get_run_metrics(run_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 工具 3：get_run_explain
+# 工具 3：get_run_failures
+# ---------------------------------------------------------------------------
+
+_FAILURE_MAX_GROUPS = 10
+_FAILURE_MAX_EXCEPTIONS = 5
+_FAILURE_MSG_CHARS = 300
+
+
+def _short_text(value, limit: int = _FAILURE_MSG_CHARS) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _parse_seen(value) -> Optional[float]:
+    """locust 的 First/Last Seen 兼容两种真实格式：epoch 秒（浮点）与 ISO 8601（带 Z）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _read_csv_rows(path) -> Optional[list]:
+    """读 CSV 为 dict 列表；文件不存在/不可读返回 None（与"仅表头的空表"区分）。"""
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+    except OSError:
+        return None
+
+
+def get_run_failures(run_id: str) -> dict:
+    """读取 locust 失败明细（failures.csv / exceptions.csv）：错误类型、次数、首末时间。
+
+    只读已有产物，不连接目标库。零失败的任务也会留下只有表头的文件；
+    文件缺失按 FAILURES_NOT_AVAILABLE 返回（可重试），与"零失败"是两种状态。
+    """
+
+    def _failures(run_id):
+        run = _fetch_run(run_id)
+        if run is None:
+            raise _ToolError("RUN_NOT_FOUND", "任务不存在", False)
+        base = settings.data_dir / "locust"
+        failures_path = base / f"{run_id}_failures.csv"
+        exceptions_path = base / f"{run_id}_exceptions.csv"
+        rows = _read_csv_rows(failures_path)
+        if rows is None:
+            reason = ("任务仍在运行，失败明细尚未生成"
+                      if run["status"] in ("pending", "running")
+                      else "产物缺失（可能平台重启或该任务未生成）")
+            raise _ToolError(
+                "FAILURES_NOT_AVAILABLE",
+                f"未找到 {failures_path.name}：{reason}；这不代表没有失败，"
+                "请以 stats.csv 的失败数（summary.total_failures）为准",
+                True,
+            )
+
+        t0 = _epoch_seconds(run.get("started_at"))
+        warnings: list = []
+        grouped: dict = {}
+        total = 0
+        for row in rows:
+            name = (row.get("Name") or "").strip()
+            message = _short_text(row.get("Error"))
+            try:
+                count = int(float(row.get("Occurrences") or 0))
+            except (TypeError, ValueError):
+                count = 0
+            if count <= 0:
+                continue
+            entry = grouped.setdefault((name, message),
+                                       {"occurrences": 0, "first": None, "last": None})
+            entry["occurrences"] += count
+            total += count
+            for field, key in (("First Seen", "first"), ("Last Seen", "last")):
+                seen = _parse_seen(row.get(field))
+                if seen is None:
+                    continue
+                current = entry[key]
+                entry[key] = seen if current is None else (
+                    min(current, seen) if key == "first" else max(current, seen))
+
+        groups = []
+        for (name, message), entry in sorted(grouped.items(),
+                                             key=lambda item: -item[1]["occurrences"]):
+            group = {
+                "sql_id": name or None,
+                "error": message,
+                "occurrences": entry["occurrences"],
+                "share": round(entry["occurrences"] / total, 4) if total else None,
+            }
+            if t0 is not None:
+                for out_key, key in (("first_offset_sec", "first"), ("last_offset_sec", "last")):
+                    seen = entry[key]
+                    group[out_key] = int(max(0.0, seen - t0)) if seen is not None else None
+            groups.append(group)
+        omitted = max(0, len(groups) - _FAILURE_MAX_GROUPS)
+        groups = groups[:_FAILURE_MAX_GROUPS]
+
+        exceptions = []
+        for row in _read_csv_rows(exceptions_path) or []:
+            try:
+                count = int(float(row.get("Count") or 0))
+            except (TypeError, ValueError):
+                count = 0
+            message = _short_text(row.get("Message"))
+            if count > 0 and message:
+                exceptions.append({"message": message, "count": count})
+        exceptions.sort(key=lambda item: -item["count"])
+        exceptions = exceptions[:_FAILURE_MAX_EXCEPTIONS]
+
+        if omitted:
+            warnings.append(f"失败分组超过 {_FAILURE_MAX_GROUPS} 组，按出现次数保留前 "
+                            f"{_FAILURE_MAX_GROUPS} 组，省略 {omitted} 组")
+        if not groups:
+            warnings.append("failures.csv 存在但无失败记录：本次任务零失败")
+        if t0 is None:
+            warnings.append("缺少 started_at，offset 字段未给出")
+        # 顺手做一次与 stats.csv 的一致性检查（口径不一致时给警告，不擅自改数）
+        aggregate, _ = read_stats(run_id)
+        if aggregate is not None:
+            try:
+                stats_failures = int(float(aggregate.get("Failure Count") or 0))
+            except (TypeError, ValueError):
+                stats_failures = None
+            if stats_failures is not None and stats_failures != total:
+                warnings.append(f"failures.csv 合计 {total} 与 stats.csv 失败数 "
+                                f"{stats_failures} 不一致，口径可能有差异")
+
+        data = {
+            "run_id": run_id,
+            "available": True,
+            "source": failures_path.name,
+            "t0": run.get("started_at"),
+            "total_failures": total,
+            "group_count": len(groups) + omitted,
+            "groups": groups,
+            "exceptions": exceptions,
+            "field_notes": {
+                "occurrences": "该错误类型的累计出现次数；与 stats.csv 的 Failure Count 同源",
+                "share": "占全部失败的比例（0 到 1）",
+                "offsets": "first/last_offset_sec 相对 started_at，可与 metrics series 的 offsets_sec 对齐",
+                "exceptions": "取自 exceptions.csv，仅 Message（已清洗并截断），不含 Traceback",
+                "empty": "groups 为空表示零失败；工具报错（FAILURES_NOT_AVAILABLE）才是明细缺失",
+            },
+        }
+        return _ok(run_id, data, warnings)
+
+    normalized = _norm_run_id(run_id)
+    if normalized is None:
+        return _fail(None, "INVALID_RUN_ID", "run_id 必须是 8 位十六进制", False)
+    return _wrap(normalized, _failures)
+
+
+# ---------------------------------------------------------------------------
+# 工具 4：get_run_explain
 # ---------------------------------------------------------------------------
 
 _CAVEATS_EXPLAIN = [
@@ -552,7 +933,7 @@ def get_run_explain(run_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 工具 4：get_table_profile（本模块唯一连目标库的工具，需显式开关）
+# 工具 5：get_table_profile（本模块唯一连目标库的工具，需显式开关）
 # ---------------------------------------------------------------------------
 
 def get_table_profile(run_id: str, table_name: str) -> dict:

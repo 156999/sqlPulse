@@ -115,6 +115,32 @@ def test_datagen_shared_placeholders_and_row_count_are_persisted(client, monkeyp
     assert payload["row_count"] == 123 and payload["variables"]["id"] == "rand(10,20)"
 
 
+    assert job["owner_user_id"] == db.get_user_by_username("root")["id"]
+    assert len(db.list_datagen_jobs_for_user(job["owner_user_id"])) == 1
+
+
+def test_datagen_missing_connection_returns_json_404(client):
+    response = client.post("/api/datagen/jobs", json={
+        "name": "missing connection", "mode": "sql",
+        "content": "INSERT INTO t VALUES (1);", "connection_id": "missing",
+    })
+    assert response.status_code == 404
+    assert "missing" in response.json()["detail"]
+
+
+def test_datagen_start_failure_returns_json_500(client, monkeypatch):
+    monkeypatch.setattr(connection_manager, "test_dsn", lambda dsn: {"ok": True})
+    def fail_start(job_id):
+        raise RuntimeError("executor unavailable")
+    monkeypatch.setattr(datagen_executor, "start", fail_start)
+    response = client.post("/api/datagen/jobs", json={
+        "name": "start failure", "mode": "sql",
+        "content": "INSERT INTO t VALUES (1);", "db_dsn": _conn_payload(),
+    })
+    assert response.status_code == 500
+    assert "executor unavailable" in response.json()["detail"]
+
+
 def test_datagen_rejects_invalid_shared_placeholder_before_connect(client, monkeypatch):
     monkeypatch.setattr(connection_manager, "test_dsn", lambda *_: pytest.fail("must validate first"))
     response = client.post("/api/datagen/jobs", json={

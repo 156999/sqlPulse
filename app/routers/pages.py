@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
@@ -51,18 +53,36 @@ def monitor_page(request: Request, run_id: str):
     return templates.TemplateResponse(request, "monitor.html", {"run": run, "tasks": tasks})
 
 
-@router.get("/runs/{run_id}/report")
-def report_page(request: Request, run_id: str):
+def _ai_card_state(request: Request, run_id: str) -> dict:
+    """AI 诊断卡片的模板上下文：密钥状态 + 最近一次 job 视图。"""
+    from app.ai import diagnose_runner
+
+    user_id = connection_manager.current_user_id(get_current_user(request))
+    return {
+        "ai": diagnose_runner.key_state(user_id),
+        "job_view": diagnose_runner.job_view(db.get_latest_ai_job(run_id)),
+    }
+
+
+def _report_context(request: Request, run_id: str, ai_key_error: str = "") -> Optional[dict]:
+    """报告页模板上下文；任务不存在返回 None。key 表单校验失败时复用本函数重渲染。"""
     run = db.get_run(run_id)
     if not run:
-        return templates.TemplateResponse(request, "error.html", {"message": f"任务 {run_id} 不存在"}, status_code=404)
+        return None
     report = db.get_report(run_id)
     if not report:
         from app.services.report import generate_report
         report = generate_report(run_id)
     from app.services.l1 import build_view
     l1_view = build_view(report["l1"], report.get("l0") or {}) if report else None
-    return templates.TemplateResponse(
-        request, "report.html",
-        {"run": run, "report": report, "l1_view": l1_view},
-    )
+    ctx = {"run": run, "report": report, "l1_view": l1_view, "ai_key_error": ai_key_error}
+    ctx.update(_ai_card_state(request, run_id))
+    return ctx
+
+
+@router.get("/runs/{run_id}/report")
+def report_page(request: Request, run_id: str):
+    ctx = _report_context(request, run_id)
+    if ctx is None:
+        return templates.TemplateResponse(request, "error.html", {"message": f"任务 {run_id} 不存在"}, status_code=404)
+    return templates.TemplateResponse(request, "report.html", ctx)

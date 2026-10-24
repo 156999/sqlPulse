@@ -132,6 +132,8 @@
 </div>
 {% endif %}
 
+{% include "ai_diagnose.html" %}
+
 <div class="form-actions">
   <a class="primary" href="/api/runs/{{ run.id }}/report/download">下载 Markdown 报告</a>
 </div>

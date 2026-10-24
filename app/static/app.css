@@ -186,3 +186,8 @@ details.card summary { cursor: pointer; font-weight: 600; color: #374151; }
   .layout:has(#run-form) .sidebar nav a, .layout:has(#run-form) .logo, .layout:has(#run-form) .sidebar-foot { padding-left: 12px; padding-right: 12px; }
   .layout:has(#run-form) .logo { font-size: 17px; }
 }
+
+.ai-key-form { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+.ai-key-form input { flex: 1; max-width: 420px; }
+.ai-diag-area { margin-top: 10px; }
+.ai-diag-area .advice code { margin-right: 4px; }

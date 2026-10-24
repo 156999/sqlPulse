@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE TABLE IF NOT EXISTS datagen_jobs (
   id                TEXT PRIMARY KEY,
+  owner_user_id     TEXT,
   name              TEXT NOT NULL,
   mode              TEXT NOT NULL,
   status            TEXT NOT NULL,
@@ -93,6 +94,27 @@ CREATE TABLE IF NOT EXISTS mysql_connections (
 );
 CREATE INDEX IF NOT EXISTS idx_mysql_connections_user
   ON mysql_connections (user_id);
+CREATE TABLE IF NOT EXISTS ai_keys (
+  user_id        TEXT PRIMARY KEY,
+  key_encrypted  TEXT NOT NULL,
+  masked         TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_jobs (
+  id            TEXT PRIMARY KEY,
+  run_id        TEXT NOT NULL,
+  user_id       TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  result_json   TEXT,
+  error_code    TEXT,
+  error_msg     TEXT,
+  created_at    TEXT NOT NULL,
+  started_at    TEXT,
+  ended_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ai_jobs_run
+  ON ai_jobs (run_id, created_at);
 """
 
 
@@ -176,6 +198,9 @@ def init_schema() -> None:
         for col, typ in _METRIC_ALTERS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+        datagen_columns = {r[1] for r in conn.execute("PRAGMA table_info(datagen_jobs)")}
+        if "owner_user_id" not in datagen_columns:
+            conn.execute("ALTER TABLE datagen_jobs ADD COLUMN owner_user_id TEXT")
         _migrate_plaintext_credentials(conn)
     seed_root_user()
 
@@ -307,6 +332,93 @@ def delete_connection(user_id: str, connection_id: str) -> bool:
         )
         return cur.rowcount > 0
 
+
+# ---- AI 诊断：用户自填模型 key（加密落库）与后台诊断 job ----
+# ai_keys 存 Fernet 密文（密钥由 APP_SECRET_KEY 派生，见 app/ai/key_store.py），
+# 明文只出现在 key_store 的加解密瞬间；masked 仅供页面回显。
+# ai_jobs 复刻 runs/datagen_jobs 的状态机：pending → running → finished/failed，
+# 平台重启时由 recover_ai_orphans() 统一标记失败。
+
+def upsert_ai_key(user_id: str, key_encrypted: str, masked: str) -> Optional[dict]:
+    now = datetime.now().isoformat(timespec="seconds")
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO ai_keys (user_id,key_encrypted,masked,created_at,updated_at)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(user_id) DO UPDATE SET"
+            " key_encrypted=excluded.key_encrypted, masked=excluded.masked,"
+            " updated_at=excluded.updated_at",
+            (user_id, key_encrypted, masked, now, now),
+        )
+    return get_ai_key(user_id)
+
+
+def get_ai_key(user_id: str) -> Optional[dict]:
+    row = _fetch_one("SELECT * FROM ai_keys WHERE user_id=?", (user_id,))
+    return dict(row) if row else None
+
+
+def delete_ai_key(user_id: str) -> bool:
+    with tx() as conn:
+        cur = conn.execute("DELETE FROM ai_keys WHERE user_id=?", (user_id,))
+        return cur.rowcount > 0
+
+
+def create_ai_job(job_id: str, run_id: str, user_id: str, status: str) -> None:
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO ai_jobs (id,run_id,user_id,status,created_at) VALUES (?,?,?,?,?)",
+            (job_id, run_id, user_id, status, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def get_ai_job(job_id: str) -> Optional[dict]:
+    row = _fetch_one("SELECT * FROM ai_jobs WHERE id=?", (job_id,))
+    return dict(row) if row else None
+
+
+def get_latest_ai_job(run_id: str) -> Optional[dict]:
+    row = _fetch_one(
+        "SELECT * FROM ai_jobs WHERE run_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (run_id,),
+    )
+    return dict(row) if row else None
+
+
+def update_ai_job(job_id: str, fields: dict) -> None:
+    sets = ", ".join(f"{k}=:{k}" for k in fields)
+    fields = dict(fields)
+    fields["id"] = job_id
+    with tx() as conn:
+        conn.execute(f"UPDATE ai_jobs SET {sets} WHERE id=:id", fields)
+
+
+def list_inflight_ai_jobs(run_id: str) -> list:
+    rows = _fetch_all(
+        "SELECT * FROM ai_jobs WHERE run_id=? AND status IN ('pending','running')",
+        (run_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+def count_inflight_ai_jobs_by_user(user_id: str) -> int:
+    row = _fetch_one(
+        "SELECT COUNT(*) AS c FROM ai_jobs WHERE user_id=? AND status IN ('pending','running')",
+        (user_id,),
+    )
+    return int(row["c"]) if row else 0
+
+
+def recover_ai_orphans() -> int:
+    with tx() as conn:
+        cur = conn.execute(
+            "UPDATE ai_jobs SET status='failed', error_code='PLATFORM_RESTARTED',"
+            " error_msg='平台重启中断', ended_at=datetime('now')"
+            " WHERE status IN ('pending','running')"
+        )
+        return cur.rowcount
+
+
 def recover_orphans() -> int:
     with tx() as conn:
         cur = conn.execute(
@@ -355,9 +467,9 @@ def update_run(run_id: str, fields: dict) -> None:
 def create_datagen_job(row: dict) -> None:
     with tx() as conn:
         conn.execute(
-            "INSERT INTO datagen_jobs (id,name,mode,status,target_dsn_json,input_json,created_at)"
-            " VALUES (:id,:name,:mode,:status,:target_dsn_json,:input_json,:created_at)",
-            row,
+            "INSERT INTO datagen_jobs (id,owner_user_id,name,mode,status,target_dsn_json,input_json,created_at)"
+            " VALUES (:id,:owner_user_id,:name,:mode,:status,:target_dsn_json,:input_json,:created_at)",
+            {"owner_user_id": None, **row},
         )
 
 
@@ -366,9 +478,34 @@ def get_datagen_job(job_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_datagen_job_for_user(user_id: str, job_id: str) -> Optional[dict]:
+    row = _fetch_one(
+        "SELECT * FROM datagen_jobs WHERE id=? AND owner_user_id=?",
+        (job_id, user_id),
+    )
+    return dict(row) if row else None
+
+
 def list_datagen_jobs() -> list:
     rows = _fetch_all("SELECT * FROM datagen_jobs ORDER BY created_at DESC")
     return [dict(r) for r in rows]
+
+
+def list_datagen_jobs_for_user(user_id: str) -> list:
+    rows = _fetch_all(
+        "SELECT * FROM datagen_jobs WHERE owner_user_id=? ORDER BY created_at DESC",
+        (user_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+def claim_legacy_datagen_jobs(user_id: str) -> int:
+    with tx() as conn:
+        cur = conn.execute(
+            "UPDATE datagen_jobs SET owner_user_id=? WHERE owner_user_id IS NULL",
+            (user_id,),
+        )
+        return cur.rowcount
 
 
 def update_datagen_job(job_id: str, fields: dict) -> None:
@@ -415,5 +552,8 @@ def get_report(run_id: str) -> Optional[dict]:
         return None
     d = dict(row)
     d["l0"] = json.loads(d.pop("l0_json"))
-    d["l1"] = json.loads(d.pop("l1_json"))
+    # l1_json 有两种形状：新版 dict（带 verdict）、旧版 list[dict]。
+    # 归一化后历史报告页不 500，只降级为"旧版规则建议"样式。
+    from app.services.l1.contract import normalize_l1
+    d["l1"] = normalize_l1(json.loads(d.pop("l1_json")))
     return d

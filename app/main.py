@@ -12,7 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app import db
 from app.auth import require_user
 from app.config import settings
-from app.routers import auth, connections, datagen, explain, monitor, pages, reports, tasks
+from app.routers import ai, auth, connections, datagen, explain, monitor, pages, reports, tasks
 from app.services.collector import collector
 from app.services.report import generate_report
 from app.services.runner import runner
@@ -32,11 +32,13 @@ async def lifespan(app: FastAPI):
     db.init_schema()
     recovered = db.recover_orphans()
     datagen_recovered = db.recover_datagen_orphans()
-    if recovered or datagen_recovered:
+    ai_recovered = db.recover_ai_orphans()
+    if recovered or datagen_recovered or ai_recovered:
         logger.warning(
-            "recovered {} orphan run(s) and {} datagen job(s) to failed",
+            "recovered {} orphan run(s), {} datagen job(s) and {} ai job(s) to failed",
             recovered,
             datagen_recovered,
+            ai_recovered,
         )
     runner.set_on_finish(lambda run_id: generate_report(run_id))
     task = asyncio.create_task(collector.run_loop())
@@ -71,4 +73,5 @@ app.include_router(tasks.router, dependencies=[Depends(require_user)])
 app.include_router(explain.router, dependencies=[Depends(require_user)])
 app.include_router(monitor.router, dependencies=[Depends(require_user)])
 app.include_router(reports.router, dependencies=[Depends(require_user)])
+app.include_router(ai.router, dependencies=[Depends(require_user)])
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")

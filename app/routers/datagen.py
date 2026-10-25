@@ -94,7 +94,10 @@ def datagen_page(request: Request):
 def datagen_multi_page(request: Request):
     """「多表导入」子栏目：复用造数模板，但不渲染标签栏，直接进入多表导入面板。"""
     return templates.TemplateResponse(
-        request, "datagen.html", _datagen_page_context(request, initial_mode="multi")
+        request,
+        "datagen.html",
+        _datagen_page_context(request, initial_mode="multi")
+    )
     return templates.TemplateResponse(
         request,
         "datagen.html",

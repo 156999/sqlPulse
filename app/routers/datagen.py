@@ -61,8 +61,8 @@ def _safe_job(job: dict) -> dict:
 
 
 def _datagen_page_context(request: Request, initial_mode: str = "") -> dict:
-@router.get("/datagen")
-def datagen_page(request: Request):
+# @router.get("/datagen")
+# def datagen_page(request: Request):
     default_dsn = {
         "host": settings.target_db_host,
         "port": settings.target_db_port,

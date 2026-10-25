@@ -21,6 +21,7 @@ jobs:
       # Test-only credentials for this job's disposable services; fork PRs have no repository secrets.
       MYSQL_ROOT_PASSWORD: sqlpulse-ci-mysql-password
       APP_SECRET_KEY: sqlpulse-ci-session-secret
+      SQLPULSE_CREDENTIAL_KEY: "FeOUntEgydI8rJqpU25GWDNInYjQD2kQWgIDa3PfPlo="
       WEB_PORT: "8080"
       MYSQL_HOST_PORT: "3307"
       # The API forwards this DSN to the web container, which resolves the mysql service name.

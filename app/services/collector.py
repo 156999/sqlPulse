@@ -10,6 +10,7 @@ from loguru import logger
 
 from app import db
 from app.config import settings
+from app.services.credential_crypto import decrypt_dsn_snapshot
 
 # 需要差分为"每秒增量"的计数器（SHOW GLOBAL STATUS 键名）
 COUNTER_KEYS = [
@@ -166,7 +167,7 @@ class Collector:
 
         run_id = run["id"]
         hist = read_last_history(settings.data_dir / "locust" / f"{run_id}_stats_history.csv")
-        dsn = jsonmod.loads(run["db_dsn_json"])
+        dsn = decrypt_dsn_snapshot(jsonmod.loads(run["db_dsn_json"]))
         status = None
         try:
             status = self._query_status(dsn)

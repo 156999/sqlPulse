@@ -17,6 +17,7 @@ from app.models import DbDsn
 from app.routers import auth as auth_router
 from app.routers import connections, datagen, pages, tasks
 from app.services import connection_manager
+from app.services.credential_crypto import credential_crypto, decrypt_dsn_snapshot
 from app.services.datagen import datagen_executor
 from app.services.runner import now_iso, runner
 
@@ -214,18 +215,50 @@ def test_connection_api_crud_and_password_semantics(client):
     assert r.json()["has_password"] is True
     root_id = db.get_user_by_username("root")["id"]
     row = db.get_connection(root_id, conn["id"])
-    assert row["password"] == "secret123"
+    assert row["password"] == ""
+    assert row["password_ciphertext"] != "secret123"
+    assert credential_crypto.decrypt(row["password_ciphertext"]) == "secret123"
 
     # 提交新密码则更新
     payload["password"] = "new-secret"
     r = client.put(f"/api/connections/{conn['id']}", json=payload)
     assert r.status_code == 200 and r.json()["has_password"] is True
     row = db.get_connection(root_id, conn["id"])
-    assert row["password"] == "new-secret"
+    assert row["password"] == ""
+    assert credential_crypto.decrypt(row["password_ciphertext"]) == "new-secret"
 
     r = client.delete(f"/api/connections/{conn['id']}")
     assert r.status_code == 200
     assert client.get(f"/api/connections/{conn['id']}").status_code == 404
+
+
+def test_init_schema_migrates_legacy_plaintext_credentials(tmp_db):
+    user = db.create_user("legacy-user", hash_password("pw"))
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO mysql_connections"
+            " (id,user_id,name,host,port,user,password,database,created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ( "legacy-conn", user["id"], "旧连接", "db", 3306, "app", "legacy-pw", "demo", "now", "now"),
+        )
+        conn.execute(
+            "INSERT INTO runs"
+            " (id,name,status,sql_source,sql_content,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy-run", "旧任务", "pending", "paste", "SELECT 1;", 1, 1, 5,
+                json.dumps({"host": "db", "port": 3306, "user": "app", "password": "run-pw", "database": "demo"}),
+                "now",
+            ),
+        )
+    db.init_schema()
+
+    row = db.get_connection(user["id"], "legacy-conn")
+    assert row["password"] == ""
+    assert credential_crypto.decrypt(row["password_ciphertext"]) == "legacy-pw"
+    snapshot = json.loads(db.get_run("legacy-run")["db_dsn_json"])
+    assert "password" not in snapshot
+    assert decrypt_dsn_snapshot(snapshot)["password"] == "run-pw"
 
 
 def test_same_name_conflict_for_same_user(client):
@@ -253,7 +286,9 @@ def test_saved_connection_is_used_for_run_snapshot(client, monkeypatch):
     assert r.status_code == 201, r.text
     run = db.get_run(r.json()["run_id"])
     snapshot = json.loads(run["db_dsn_json"])
-    assert snapshot == {
+    assert "password" not in snapshot
+    assert snapshot["password_ciphertext"] != "secret123"
+    assert decrypt_dsn_snapshot(snapshot) == {
         "host": "127.0.0.1",
         "port": 3306,
         "user": "app_user",
@@ -284,7 +319,8 @@ def test_saved_connection_is_used_for_datagen_snapshot(client, monkeypatch):
     snapshot = json.loads(job["target_dsn_json"])
     assert snapshot["host"] == "127.0.0.1"
     assert snapshot["user"] == "app_user"
-    assert snapshot["password"] == "secret123"
+    assert "password" not in snapshot
+    assert credential_crypto.decrypt(snapshot["password_ciphertext"]) == "secret123"
 
 
 def test_connection_and_dsn_conflict_returns_400(client):
@@ -325,7 +361,9 @@ def test_legacy_db_dsn_request_still_works(client, monkeypatch):
     r = client.post("/api/runs", json=body)
     assert r.status_code == 201, r.text
     run = db.get_run(r.json()["run_id"])
-    assert json.loads(run["db_dsn_json"]) == body["db_dsn"]
+    snapshot = json.loads(run["db_dsn_json"])
+    assert "password" not in snapshot
+    assert decrypt_dsn_snapshot(snapshot) == body["db_dsn"]
 
 
 def test_connection_owned_by_other_user_is_invisible(client, api_app, tmp_db):

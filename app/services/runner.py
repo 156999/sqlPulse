@@ -15,6 +15,7 @@ from loguru import logger
 from app import db
 from app.config import settings
 from app.services import explain_probe
+from app.services.credential_crypto import decrypt_dsn_snapshot
 from app.services.sql_params import tokens, compile_tasks
 
 WEIGHT_RE = re.compile(r"^\s*--\s*weight:\s*(\d+)", re.IGNORECASE)
@@ -154,7 +155,7 @@ class LocustRunner:
         locustfile = settings.data_dir / "locustfiles" / f"{run_id}.py"
         render_locustfile(tasks, locustfile, variables)
 
-        dsn = json.loads(run["db_dsn_json"])
+        dsn = decrypt_dsn_snapshot(json.loads(run["db_dsn_json"]))
         # EXPLAIN 采集**不在这里**做 —— 它已移到压测结束后的收尾路径，见
         # `_probe_explain_after_run()` 与 docs/design/explain-collection.md「采集时机」。
         env = os.environ.copy()
@@ -259,7 +260,7 @@ class LocustRunner:
             if not tasks:
                 return
             explain_probe.probe(
-                run_id, tasks, json.loads(run["db_dsn_json"]),
+                run_id, tasks, decrypt_dsn_snapshot(json.loads(run["db_dsn_json"])),
                 variables=json.loads(run.get("variables_json") or "{}"),
                 max_statements=settings.explain_max_statements,
                 budget_sec=settings.explain_budget_sec,

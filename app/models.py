@@ -70,6 +70,18 @@ class SqlInput(BaseModel):
         return self
 
 
+class SmartCompleteRequest(BaseModel):
+    sql: str = Field(min_length=1, max_length=200000)
+    connection_id: Optional[str] = None
+    db_dsn: Optional[DbDsn] = None
+
+    @model_validator(mode="after")
+    def one_connection(self):
+        if (self.connection_id is None) == (self.db_dsn is None):
+            raise ValueError("connection_id 与 db_dsn 必须且只能提供一个")
+        return self
+
+
 class FormTools(BaseModel):
     action: Literal["import", "convert", "serialize", "normalize", "variables", "rename", "analyze"]
     sql_content: str = ""
@@ -122,11 +134,12 @@ class MetricPoint(BaseModel):
 
 class DataGenJobCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    mode: Literal["sql", "shell"]
+    mode: Literal["sql", "shell", "multi"]
     source: Literal["paste", "file"] = "paste"
     content: str = Field(min_length=1)
     variables: dict[str, str] = Field(default_factory=dict)
     row_count: int = Field(default=1, ge=1, le=1_000_000)
+    concurrency: int = Field(default=4, ge=1, le=32)
     target_table: Optional[str] = Field(default=None, max_length=128)
     field_rules: list[dict] = Field(default_factory=list)
     connection_id: Optional[str] = None
@@ -134,6 +147,10 @@ class DataGenJobCreate(BaseModel):
     dependency_strategy: Literal["target_only", "direct_dependencies", "full_dependencies"] = "target_only"
     dependency_plan: dict = Field(default_factory=dict)
     confirm_dependency_writes: bool = False
+
+
+class DataGenAnalyzeRequest(BaseModel):
+    content: str = Field(min_length=1)
 
 
 class DataGenMetadataRequest(BaseModel):

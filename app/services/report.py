@@ -9,6 +9,8 @@ from loguru import logger
 
 from app import db
 from app.config import settings
+from app.services.rule_engine import evaluate
+from app.services.credential_crypto import decrypt_dsn_snapshot
 from app.services.runner import parse_sql_tasks
 
 
@@ -172,7 +174,7 @@ def generate_report(run_id: str) -> Optional[dict]:
     if not run or run["status"] in ("pending", "running"):
         return None
     l0 = build_l0(run)
-    dsn = json.loads(run["db_dsn_json"])
+    dsn = decrypt_dsn_snapshot(json.loads(run["db_dsn_json"]))
     max_conn = query_max_connections(dsn)
 
     from app.services import explain_probe

@@ -1,7 +1,6 @@
 from pathlib import Path
-from typing import Optional
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -16,6 +15,9 @@ class Settings(BaseSettings):
     target_db_password: str = ""
     target_db_name: str = "sqlpulse_demo"
 
+    credential_key: str = Field(default="", validation_alias="SQLPULSE_CREDENTIAL_KEY")
+    credential_key_version: str = Field(default="v1", validation_alias="SQLPULSE_CREDENTIAL_KEY_VERSION")
+
     data_dir: Path = BASE_DIR / "data"
     logs_dir: Path = BASE_DIR / "logs"
     reports_dir: Path = BASE_DIR / "reports"
@@ -25,6 +27,7 @@ class Settings(BaseSettings):
     datagen_script_timeout_sec: int = 3600
     datagen_max_sql_chars: int = 5_000_000
     datagen_max_script_chars: int = 500_000
+    datagen_max_concurrency: int = 16
 
     # 压测结束后的 EXPLAIN 采集（只读、失败不影响报告，产物落 data/explain/）。
     # 名字里的 probe 是历史叫法 —— 2026-09-25 前它跑在"压测启动前"，见
@@ -79,6 +82,8 @@ class Settings(BaseSettings):
     def _require_secret_key_when_auth_enabled(self):
         if self.auth_enabled and not self.app_secret_key:
             raise ValueError("APP_SECRET_KEY must be set when AUTH_ENABLED=true")
+        if self.auth_enabled and not self.credential_key:
+            raise ValueError("SQLPULSE_CREDENTIAL_KEY must be set when AUTH_ENABLED=true")
         return self
 
     def ensure_dirs(self) -> None:

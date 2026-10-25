@@ -33,8 +33,9 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"  # 生成 APP_SECRE
 docker compose up -d --build
 ```
 
-- 打开 http://localhost:8080，首次启动可直接用测试账号 `root / root` 登录
-- 宿主机已占用 3306 的情况下不冲突：compose 的 MySQL 默认映射到宿主机 **3307**（web 容器走内部网络访问 mysql:3306 不受影响）
+- 打开 http://localhost:8080（宿主端口可在 `.env` 用 `WEB_PORT` 修改），首次启动可直接用测试账号 `root / root` 登录
+- 宿主机已占用 3306 的情况下不冲突：compose 的 MySQL 默认映射到宿主机 **3307**（web 容器走内部网络访问 mysql:3306 不受影响），亦可用 `MYSQL_HOST_PORT` 调整
+- 若启动报 `ports are not available: ... bind: An attempt was made to access a socket in a way forbidden by its access permissions`，说明该宿主端口被占用或**被 Windows 保留**（Hyper-V/WinNAT 会保留一段动态端口，与是否有进程占用无关）：改 `.env` 的 `WEB_PORT` 换一个端口即可
 - 结束后 `docker compose down`；加 `-v` 会连同命名卷一起清空并重新执行 seed 脚本
 
 ### 方式三：本地 Python 运行（被测库自备或复用已起的 MySQL）
@@ -48,7 +49,7 @@ mysql -h 127.0.0.1 -u root -p < scripts/seed_demo.sql   # 初始化示例库
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-打开 http://localhost:8080，首次启动可用 `root / root` 登录；也可以进入“注册”创建新账号。
+打开 http://localhost:8080（端口被占用或保留时可换成别的，见上），首次启动可用 `root / root` 登录；也可以进入“注册”创建新账号。
 
 ## 认证
 

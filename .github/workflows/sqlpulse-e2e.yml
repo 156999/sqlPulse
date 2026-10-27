@@ -18,9 +18,10 @@ jobs:
 
     env:
       PIP_INDEX_URL: https://pypi.org/simple
-      # Test-only credentials for this job's disposable services; fork PRs have no repository secrets.
-      MYSQL_ROOT_PASSWORD: sqlpulse-ci-mysql-password
-      APP_SECRET_KEY: sqlpulse-ci-session-secret
+      # Test-only credentials for this job's disposable services.
+      MYSQL_ROOT_PASSWORD: ${{ secrets.CI_MYSQL_ROOT_PASSWORD }}
+      APP_SECRET_KEY: ${{ secrets.CI_APP_SECRET_KEY }}
+      SQLPULSE_CREDENTIAL_KEY: ${{ secrets.SQLPULSE_CREDENTIAL_KEY }}
       WEB_PORT: "8080"
       MYSQL_HOST_PORT: "3307"
       # The API forwards this DSN to the web container, which resolves the mysql service name.

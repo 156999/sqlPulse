@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}用户信息 · SQL Pulse{% endblock %}
+{% block nav_profile %}class="active"{% endblock %}
+{% block content %}
+<h1>用户信息</h1>
+
+<div class="card">
+  <h3>账号信息</h3>
+  <table class="table">
+    <tr><th>用户名</th><td>{{ user.username if user else '匿名用户' }}</td></tr>
+    <tr><th>用户 ID</th><td><code>{{ user.id if user else '（匿名空间）' }}</code></td></tr>
+  </table>
+</div>
+
+<div class="card" id="ai-key">
+  <h3>AI 模型密钥</h3>
+  <p>
+    {% if ai.source == 'user' %}
+      已配置：<code>{{ ai.masked }}</code>
+      <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }} · 费用由该密钥承担</span>
+    {% elif ai.source == 'server' %}
+      将使用服务器默认密钥 <code>{{ ai.masked }}</code>
+      <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }}</span>
+    {% elif ai.source == 'broken' %}
+      <span class="err-msg">已保存的密钥无法解密（APP_SECRET_KEY 可能已更换），请重新填写。</span>
+    {% else %}
+      <span class="muted">未配置密钥：AI 诊断不会调用模型。</span>
+    {% endif %}
+  </p>
+  {% if ai_key_error %}<p class="err-msg">{{ ai_key_error }}</p>{% endif %}
+  <form method="post" action="/api/ai/key" class="ai-key-form">
+    <input type="password" name="api_key" autocomplete="new-password" maxlength="1024"
+           placeholder="sk-…（粘贴你的模型 API Key）">
+    <button class="primary">{{ '替换密钥' if ai.source in ('user', 'broken') else '保存密钥' }}</button>
+  </form>
+  {% if ai.source in ('user', 'broken') %}
+  <form method="post" action="/api/ai/key/delete" class="ai-key-form"
+        onsubmit="return confirm('确定删除已保存的模型密钥？删除后 AI 诊断不可用。');">
+    <button>删除密钥</button>
+  </form>
+  {% endif %}
+  <p class="hint">
+    密钥经 Fernet 加密后存储，页面只显示掩码；更换 APP_SECRET_KEY 后需重新填写；
+    该密钥只用于当前用户的 AI 诊断，费用由该密钥承担。
+  </p>
+</div>
+{% endblock %}

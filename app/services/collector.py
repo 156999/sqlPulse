@@ -8,15 +8,34 @@ from typing import Optional
 import pymysql
 from loguru import logger
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - requirements install psutil in normal deployments
+    psutil = None
+
 from app import db
 from app.config import settings
 from app.services.credential_crypto import decrypt_dsn_snapshot
+from app.services.observability import read_exception_summary
 
 # 需要差分为"每秒增量"的计数器（SHOW GLOBAL STATUS 键名）
 COUNTER_KEYS = [
     "Questions", "Slow_queries", "Innodb_row_lock_waits",
-    "Created_tmp_disk_tables", "Com_commit",
+    "Innodb_row_lock_time", "Innodb_deadlocks", "Innodb_log_waits",
+    "Innodb_log_writes", "Innodb_log_write_requests", "Created_tmp_disk_tables", "Com_commit",
 ]
+
+COUNTER_FIELDS = {
+    "Questions": "mysql_qps",
+    "Slow_queries": "slow_inc",
+    "Innodb_row_lock_waits": "lock_waits_inc",
+    "Innodb_row_lock_time": "lock_wait_ms_inc",
+    "Innodb_deadlocks": "deadlocks_inc",
+    "Innodb_log_waits": "innodb_log_waits_inc",
+    "Innodb_log_writes": "innodb_log_writes_inc",
+    "Innodb_log_write_requests": "innodb_log_write_requests_inc",
+    "Created_tmp_disk_tables": "tmp_disk_inc",
+}
 
 
 def _num(row: dict, keys: list, default=None):
@@ -91,6 +110,9 @@ class Collector:
         self._mysql_conn = None
         self._mysql_dsn = None
         self._last_status: dict = {}  # run_id -> 上一次 SHOW GLOBAL STATUS 快照
+        self._last_host_io: dict = {}  # run_id -> host IO/network counters
+        if psutil:
+            psutil.cpu_percent(interval=None)  # prime the non-blocking CPU sampler
 
     def subscribe(self, run_id: str) -> asyncio.Queue:
         q = asyncio.Queue()
@@ -104,6 +126,7 @@ class Collector:
         if not qs:
             self.subscribers.pop(run_id, None)
             self._last_status.pop(run_id, None)
+            self._last_host_io.pop(run_id, None)
 
     def _broadcast(self, run_id: str, point: dict) -> None:
         for q in list(self.subscribers.get(run_id, [])):
@@ -134,6 +157,24 @@ class Collector:
                         out[k] = int(v)
                     except (TypeError, ValueError):
                         continue  # 跳过非数值状态（TLS 证书串 / ON-OFF / 时间戳等）
+                cur.execute("SHOW GLOBAL VARIABLES LIKE 'max_connections'")
+                row = cur.fetchone()
+                if row:
+                    try:
+                        out["max_connections"] = int(row[1])
+                    except (TypeError, ValueError):
+                        pass
+                try:
+                    cur.execute(
+                        "SELECT COUNT(DISTINCT USER) FROM information_schema.PROCESSLIST "
+                        "WHERE USER IS NOT NULL AND USER <> '' AND COMMAND <> 'Sleep'"
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        out["active_users"] = int(row[0])
+                except Exception:
+                    # PROCESS privilege is not required for the rest of SHOW GLOBAL STATUS.
+                    pass
                 return out
         except Exception:
             self._mysql_conn = None
@@ -146,12 +187,7 @@ class Collector:
         if prev:
             for key in COUNTER_KEYS:
                 if key in status and key in prev:
-                    out_key = {
-                        "Questions": "mysql_qps",
-                        "Slow_queries": "slow_inc",
-                        "Innodb_row_lock_waits": "lock_waits_inc",
-                        "Created_tmp_disk_tables": "tmp_disk_inc",
-                    }.get(key)
+                    out_key = COUNTER_FIELDS.get(key)
                     if out_key:
                         out[out_key] = max(0, status[key] - prev[key])
         # buffer pool 命中率（累计口径，非差分）
@@ -160,7 +196,43 @@ class Collector:
         if reads is not None and requests is not None and requests > 0:
             out["bufpool_hit"] = (requests - reads) / requests
         self._last_status[run_id] = status
+        out["lock_current_waits"] = status.get("Innodb_row_lock_current_waits")
+        out["innodb_log_pending_fsyncs"] = status.get("Innodb_os_log_pending_fsyncs")
+        out["innodb_log_pending_writes"] = status.get("Innodb_os_log_pending_writes")
         return out
+
+    def _host_metrics(self, run_id: str) -> tuple[dict, Optional[str]]:
+        if psutil is None:
+            return {}, "host_metrics_unavailable"
+        try:
+            now = time.monotonic()
+            io = psutil.disk_io_counters()
+            net = psutil.net_io_counters()
+            previous = self._last_host_io.get(run_id)
+            elapsed = max(now - previous["now"], 0.001) if previous else None
+            out = {
+                "cpu_pct": float(psutil.cpu_percent(interval=None)),
+                "memory_pct": float(psutil.virtual_memory().percent),
+                "memory_used_mb": psutil.virtual_memory().used / 1024 / 1024,
+                "disk_used_pct": float(psutil.disk_usage(str(settings.data_dir)).percent),
+            }
+            if io and previous and elapsed:
+                out["disk_read_mb_s"] = max(0, io.read_bytes - previous["read_bytes"]) / elapsed / 1024 / 1024
+                out["disk_write_mb_s"] = max(0, io.write_bytes - previous["write_bytes"]) / elapsed / 1024 / 1024
+            if net and previous and elapsed:
+                out["net_recv_mb_s"] = max(0, net.bytes_recv - previous["recv_bytes"]) / elapsed / 1024 / 1024
+                out["net_sent_mb_s"] = max(0, net.bytes_sent - previous["sent_bytes"]) / elapsed / 1024 / 1024
+            self._last_host_io[run_id] = {
+                "now": now,
+                "read_bytes": io.read_bytes if io else 0,
+                "write_bytes": io.write_bytes if io else 0,
+                "recv_bytes": net.bytes_recv if net else 0,
+                "sent_bytes": net.bytes_sent if net else 0,
+            }
+            return out, None
+        except Exception as exc:
+            logger.debug("host metrics query failed: {}", exc)
+            return {}, "host_metrics_unavailable"
 
     def sample(self, run: dict) -> Optional[dict]:
         import json as jsonmod
@@ -176,19 +248,40 @@ class Collector:
         if hist is None and status is None:
             return None
 
+        host, _host_error = self._host_metrics(run_id)
+
         point = {
             "run_id": run_id,
             "ts": int(time.time()),
+            "metric_scope": "window",
             "qps": (hist or {}).get("qps"),
             "avg_ms": (hist or {}).get("avg_ms"),
             "p95_ms": (hist or {}).get("p95_ms"),
             "p99_ms": (hist or {}).get("p99_ms"),
             "err_rate": (hist or {}).get("err_rate"),
         }
+        exception_summary = read_exception_summary(run_id)
+        top_exception = exception_summary["top_exception"] or {}
+        point.update({
+            "exception_count": exception_summary["exception_count"],
+            "user_start_failures": exception_summary["user_start_failures"],
+            "failure_events": exception_summary["failure_events"],
+            "top_exception_message": top_exception.get("message"),
+            "top_exception_count": top_exception.get("count"),
+            "request_count": (hist or {}).get("total_requests"),
+            "request_failures": (hist or {}).get("total_failures"),
+        })
         if status:
             point["threads_running"] = status.get("Threads_running")
             point["threads_connected"] = status.get("Threads_connected")
+            point["max_connections"] = status.get("max_connections")
+            point["active_users"] = status.get("active_users")
+            if status.get("max_connections") and status.get("Threads_connected") is not None:
+                point["connection_usage_pct"] = (
+                    status["Threads_connected"] / status["max_connections"] * 100
+                )
             point.update(self._mysql_metrics(run_id, status))
+        point.update(host)
         return point
 
     async def run_loop(self) -> None:

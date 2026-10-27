@@ -10,6 +10,7 @@ from app import db
 from app.config import settings
 from app.models import DataGenJobCreate, DbDsn
 from app.services import connection_manager
+from app.services.credential_crypto import encrypt_dsn_snapshot
 from app.services.datagen import datagen_executor
 from app.services.datagen_dependencies import build_dependency_plan
 from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
@@ -161,7 +162,9 @@ def create_job(user_id: str, body: DataGenJobCreate, *, allow_shell: bool = True
             "name": body.name,
             "mode": body.mode,
             "status": "pending",
-            "target_dsn_json": dsn.model_dump_json(),
+            "target_dsn_json": json.dumps(
+                encrypt_dsn_snapshot(_dsn_dict(dsn)), ensure_ascii=False
+            ),
             "input_json": json.dumps(
                 {
                     "source": body.source,

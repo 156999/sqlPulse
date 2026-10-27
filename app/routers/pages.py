@@ -8,6 +8,7 @@ from app.auth import get_current_user
 from app.config import settings
 from app.services import connection_manager
 from app.templating import templates
+from app.services.observability import build_snapshot
 
 router = APIRouter()
 
@@ -50,7 +51,11 @@ def monitor_page(request: Request, run_id: str):
         return templates.TemplateResponse(request, "error.html", {"message": f"任务 {run_id} 不存在"}, status_code=404)
     from app.services.runner import parse_sql_tasks
     tasks = parse_sql_tasks(run["sql_content"])
-    return templates.TemplateResponse(request, "monitor.html", {"run": run, "tasks": tasks})
+    return templates.TemplateResponse(
+        request,
+        "monitor.html",
+        {"run": run, "tasks": tasks, "observability": build_snapshot(run, db.get_metrics(run_id))},
+    )
 
 
 def _ai_card_state(request: Request, run_id: str) -> dict:

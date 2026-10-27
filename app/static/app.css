@@ -87,17 +87,42 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .status-bar { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
 .status-bar button, .status-bar a { margin-left: auto; }
 .status-bar button { margin-left: 0; }
+.observability-cards { margin-bottom: 16px; }
+.obs-card { margin-bottom: 0; display: flex; flex-direction: column; gap: 6px; min-height: 72px; }
+.obs-card strong { font-size: 18px; color: #111827; }
+.obs-card strong.obs-error { color: #dc2626; }
+.obs-card strong.obs-warn { color: #d97706; }
 
 .section-title { font-size: 17px; margin: 22px 0 10px; color: #111827; }
 .chart-stack { display: flex; flex-direction: column; gap: 16px; }
+.chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .chart-card { padding: 14px 20px 10px; }
 .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .chart-head h3 { margin-bottom: 0; }
 .chart-body { position: relative; height: 260px; }
+.engine-chart-grid .chart-body { height: 220px; }
+.chart-controls { display: inline-flex; align-items: center; gap: 8px; }
+.chart-select-label, .chart-hint { color: #6b7280; font-size: 12px; }
+.chart-select { width: auto; min-width: 120px; padding: 4px 8px; font-size: 12px; }
+.chart-hint { margin: -2px 0 8px; }
+.capacity-chart-grid .chart-body { height: 220px; }
+.event-card { margin-top: 16px; }
+.threshold-list { line-height: 1.7; margin-bottom: 10px; }
+.event-timeline { margin: 0; padding-left: 22px; max-height: 240px; overflow: auto; line-height: 1.8; }
+.event-timeline li { padding-left: 4px; }
+.event-warning { color: #b45309; }
+.event-critical { color: #dc2626; font-weight: 600; }
+.event-info { color: #059669; }
 
 .seg { display: inline-flex; border: 1px solid #d1d5db; border-radius: 6px; overflow: hidden; }
 .seg-btn { background: #fff; border: none; padding: 3px 14px; font-size: 12px; color: #374151; border-radius: 0; }
 .seg-btn.active { background: #2563eb; color: #fff; }
+
+@media (max-width: 900px) {
+  .chart-grid { grid-template-columns: 1fr; }
+  .chart-head { align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+  .chart-controls { flex-wrap: wrap; }
+}
 
 .advice { border-left: 4px solid #6b7280; background: #f9fafb; padding: 10px 14px; margin-bottom: 10px; border-radius: 0 6px 6px 0; }
 .advice p { margin-top: 4px; color: #374151; }

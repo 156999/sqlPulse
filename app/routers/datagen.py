@@ -10,6 +10,7 @@ from app.auth import get_current_user, require_user
 from app.config import settings
 from app.models import DataGenAnalyzeRequest, DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
+from app.services.sql_executor import split_sql_statements
 from app.services.sql_grouping import describe_statements
 from app.services.script_runner import tail_file
 from app.services import datagen_jobs
@@ -99,6 +100,9 @@ def list_datagen_jobs(user: Optional[dict] = Depends(require_user)):
 def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(require_user)):
     try:
         return datagen_jobs.create_job(connection_manager.current_user_id(user), body)
+    except HTTPException:
+        # 连接不存在等业务异常自带状态码，不能落到下面的 500 兜底
+        raise
     except (ValueError, ConnectionError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

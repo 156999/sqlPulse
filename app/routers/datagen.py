@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -9,12 +10,6 @@ from app.auth import get_current_user, require_user
 from app.config import settings
 from app.models import DataGenAnalyzeRequest, DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
-from app.services.credential_crypto import encrypt_dsn_snapshot
-from app.services.datagen import datagen_executor
-from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
-from app.services.datagen_dependencies import build_dependency_plan
-from app.services.runner import now_iso
-from app.services.sql_executor import split_sql_statements
 from app.services.sql_grouping import describe_statements
 from app.services.script_runner import tail_file
 from app.services import datagen_jobs
@@ -61,8 +56,6 @@ def _safe_job(job: dict) -> dict:
 
 
 def _datagen_page_context(request: Request, initial_mode: str = "") -> dict:
-@router.get("/datagen")
-def datagen_page(request: Request):
     default_dsn = {
         "host": settings.target_db_host,
         "port": settings.target_db_port,
@@ -74,13 +67,12 @@ def datagen_page(request: Request):
     return {
         "default_dsn": default_dsn,
         "connections": [connection_manager.to_public_connection(c) for c in db.list_connections(user_id)],
-        "jobs": db.list_datagen_jobs(),
+        "jobs": db.list_datagen_jobs_for_user(user_id),
         "script_enabled": settings.datagen_script_execution_enabled,
         "env_vars": _ENV_VARS,
         "max_sql_chars": settings.datagen_max_sql_chars,
         "max_script_chars": settings.datagen_max_script_chars,
         "initial_mode": initial_mode,
-        # 子栏目模式：隐藏标签栏，只呈现多表导入面板
         "standalone": initial_mode == "multi",
     }
 
@@ -95,18 +87,6 @@ def datagen_multi_page(request: Request):
     """「多表导入」子栏目：复用造数模板，但不渲染标签栏，直接进入多表导入面板。"""
     return templates.TemplateResponse(
         request, "datagen.html", _datagen_page_context(request, initial_mode="multi")
-    return templates.TemplateResponse(
-        request,
-        "datagen.html",
-        {
-            "default_dsn": default_dsn,
-            "connections": [connection_manager.to_public_connection(c) for c in db.list_connections(user_id)],
-            "jobs": db.list_datagen_jobs_for_user(user_id),
-            "script_enabled": settings.datagen_script_execution_enabled,
-            "env_vars": _ENV_VARS,
-            "max_sql_chars": settings.datagen_max_sql_chars,
-            "max_script_chars": settings.datagen_max_script_chars,
-        },
     )
 
 
@@ -117,72 +97,8 @@ def list_datagen_jobs(user: Optional[dict] = Depends(require_user)):
 
 @router.post("/api/datagen/jobs", status_code=201)
 def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(require_user)):
-    content = body.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="造数内容为空")
-    if body.mode == "shell" and not settings.datagen_script_execution_enabled:
-        raise HTTPException(status_code=400, detail="Shell 造数未开启（DATAGEN_SCRIPT_EXECUTION_ENABLED=false）")
-    max_chars = settings.datagen_max_script_chars if body.mode == "shell" else settings.datagen_max_sql_chars
-    if len(content) > max_chars:
-        raise HTTPException(status_code=400, detail=f"造数内容超过 {max_chars} 字符限制")
-    if body.mode in ("sql", "multi"):
-        try:
-            from app.services.sql_params import compile_statement, compile_variables
-            definitions = compile_variables(body.variables)
-            statements = split_sql_statements(content)
-            if not statements:
-                raise ValueError("没有可执行的 SQL 语句")
-            for i, statement in enumerate(statements, 1):
-                compile_statement(statement, definitions, f"造数 SQL 第 {i} 条")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-    dsn = _resolve_body_dsn(body, user)
-    result = connection_manager.test_dsn(dsn)
-    if not result["ok"]:
-        raise HTTPException(status_code=400, detail=f"数据库连接失败：{result['error']}")
-    applied_rules = body.field_rules
-    unique_indexes = []
-    if body.target_table:
-        try:
-            dsn_data = dsn.model_dump() if hasattr(dsn, "model_dump") else dsn
-            metadata = read_table_metadata(dsn_data, body.target_table)
-            applied = apply_database_rules(metadata, body.field_rules, body.row_count)
-            if not applied["ok"]:
-                messages = "；".join(f"{item.get('column') or '-'}：{item['message']}" for item in applied["errors"])
-                raise HTTPException(status_code=400, detail=f"数据库规则复验失败：{messages}")
-            applied_rules = applied["rules"]
-            unique_indexes = metadata.get("unique_indexes") or []
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"数据库规则复验失败：{exc}")
-
-    job_id = uuid4().hex[:8]
-    row = {
-        "id": job_id,
-        "name": body.name,
-        "mode": body.mode,
-        "status": "pending",
-        "target_dsn_json": json.dumps(encrypt_dsn_snapshot(dsn.model_dump()), ensure_ascii=False),
-        "input_json": json.dumps({"source": body.source, "content": content,
-                                   "variables": body.variables, "row_count": body.row_count,
-                                   "concurrency": body.concurrency,
-                                   "target_table": body.target_table, "field_rules": applied_rules,
-                                   "unique_indexes": unique_indexes,
-                                   "dependency_strategy": body.dependency_strategy,
-                                   "dependency_plan": body.dependency_plan,
-                                   "confirm_dependency_writes": body.confirm_dependency_writes}, ensure_ascii=False),
-        "created_at": now_iso(),
-    }
-    db.create_datagen_job(row)
-    try:
-        datagen_executor.start(job_id)
-    except ValueError as e:
     try:
         return datagen_jobs.create_job(connection_manager.current_user_id(user), body)
-    except HTTPException:
-        raise
     except (ValueError, ConnectionError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

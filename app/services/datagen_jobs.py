@@ -13,6 +13,7 @@ from app.services import connection_manager
 from app.services.datagen import datagen_executor
 from app.services.datagen_dependencies import build_dependency_plan
 from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
+from app.services.credential_crypto import encrypt_dsn_snapshot
 from app.services.runner import now_iso
 from app.services.script_runner import tail_file
 
@@ -129,10 +130,10 @@ def create_job(user_id: str, body: DataGenJobCreate, *, allow_shell: bool = True
     if body.mode == "shell":
         if not allow_shell or not settings.datagen_script_execution_enabled:
             raise ValueError("Shell 造数未开启（DATAGEN_SCRIPT_EXECUTION_ENABLED=false）")
-    max_chars = settings.datagen_max_sql_chars if body.mode == "sql" else settings.datagen_max_script_chars
+    max_chars = settings.datagen_max_script_chars if body.mode == "shell" else settings.datagen_max_sql_chars
     if len(content) > max_chars:
         raise ValueError(f"造数内容超过 {max_chars} 字符限制")
-    if body.mode == "sql":
+    if body.mode in ("sql", "multi"):
         _compile_sql(content, body.variables)
     if body.dependency_strategy != "target_only" and not body.confirm_dependency_writes:
         raise ValueError("依赖表写入需要 confirm_dependency_writes=true")
@@ -161,13 +162,14 @@ def create_job(user_id: str, body: DataGenJobCreate, *, allow_shell: bool = True
             "name": body.name,
             "mode": body.mode,
             "status": "pending",
-            "target_dsn_json": dsn.model_dump_json(),
+            "target_dsn_json": json.dumps(encrypt_dsn_snapshot(_dsn_dict(dsn)), ensure_ascii=False),
             "input_json": json.dumps(
                 {
                     "source": body.source,
                     "content": content,
                     "variables": body.variables,
                     "row_count": body.row_count,
+                    "concurrency": body.concurrency,
                     "target_table": body.target_table,
                     "field_rules": applied_rules,
                     "unique_indexes": unique_indexes,

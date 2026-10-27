@@ -1,6 +1,7 @@
 {# 网页「AI 诊断（L2）」卡片与 htmx 片段。
    fragment_only=true 时只渲染诊断区域（htmx 轮询用）；否则渲染整卡（report.html 引入）。
-   上下文：run_id、ai（密钥状态）、job_view（最近一次 job）、ai_key_error（可选）。
+   上下文：run_id、ai（密钥状态）、job_view（最近一次 job）。
+   密钥管理在「用户信息」页；本卡只显示状态与跳转链接，不提供表单。
    密钥一律只显示掩码；模型输出由 Jinja 默认转义，按纯文本渲染。 #}
 {% set run_id = run_id if run_id is defined else run.id %}
 
@@ -13,24 +14,13 @@
   将使用服务器默认密钥 <code>{{ ai.masked }}</code>
   <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }}</span>
 {% elif ai.source == 'broken' %}
-  已保存的密钥无法解密（APP_SECRET_KEY 可能已更换），请重新填写。
+  <span class="err-msg">已保存的密钥无法解密（APP_SECRET_KEY 可能已更换）。</span>
+  <a href="/profile#ai-key">去用户信息页重新填写 →</a>
 {% else %}
   <span class="muted">未配置密钥：AI 诊断不会调用模型。</span>
+  <a href="/profile#ai-key">去用户信息页填写 →</a>
 {% endif %}
 </p>
-{% if ai_key_error %}<p class="err-msg">{{ ai_key_error }}</p>{% endif %}
-<form method="post" action="/api/ai/key" class="ai-key-form">
-  <input type="hidden" name="run_id" value="{{ run_id }}">
-  <input type="password" name="api_key" autocomplete="new-password" maxlength="1024"
-         placeholder="sk-…（粘贴你的模型 API Key{% if ai.source not in ('none', 'broken') %}，保存后优先生效{% endif %}）">
-  <button class="primary">{{ '替换密钥' if ai.source in ('user', 'broken') else '保存密钥' }}</button>
-</form>
-{% if ai.source in ('user', 'broken') %}
-<form method="post" action="/api/ai/key/delete" class="ai-key-form">
-  <input type="hidden" name="run_id" value="{{ run_id }}">
-  <button>删除密钥</button>
-</form>
-{% endif %}
 {% endmacro %}
 
 {% macro error_text(err) -%}

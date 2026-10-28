@@ -95,11 +95,19 @@ CREATE TABLE IF NOT EXISTS mysql_connections (
 CREATE INDEX IF NOT EXISTS idx_mysql_connections_user
   ON mysql_connections (user_id);
 CREATE TABLE IF NOT EXISTS ai_keys (
-  user_id        TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  provider       TEXT NOT NULL,
   key_encrypted  TEXT NOT NULL,
   masked         TEXT NOT NULL,
   created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (user_id, provider)
+);
+CREATE TABLE IF NOT EXISTS ai_prefs (
+  user_id        TEXT PRIMARY KEY,
+  provider       TEXT,
+  model          TEXT,
+  updated_at     TEXT
 );
 CREATE TABLE IF NOT EXISTS ai_jobs (
   id            TEXT PRIMARY KEY,
@@ -194,6 +202,7 @@ def init_schema() -> None:
         connection_columns = {r[1] for r in conn.execute("PRAGMA table_info(mysql_connections)")}
         if "password_ciphertext" not in connection_columns:
             conn.execute("ALTER TABLE mysql_connections ADD COLUMN password_ciphertext TEXT")
+        _migrate_ai_keys(conn)
         existing = {r[1] for r in conn.execute("PRAGMA table_info(metrics)")}
         for col, typ in _METRIC_ALTERS.items():
             if col not in existing:
@@ -230,6 +239,33 @@ def _migrate_plaintext_credentials(conn: sqlite3.Connection) -> None:
                 f"UPDATE {table} SET {column}=? WHERE id=?",
                 (json.dumps(encrypt_dsn_snapshot(dsn), ensure_ascii=False), row["id"]),
             )
+
+
+def _migrate_ai_keys(conn: sqlite3.Connection) -> None:
+    """旧版 ai_keys（user_id 主键、可选 model 列）→ 每用户×每厂商 + ai_prefs。"""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(ai_keys)")}
+    if not columns or "provider" in columns:
+        return
+    conn.execute("ALTER TABLE ai_keys RENAME TO ai_keys_legacy")
+    conn.execute(
+        "CREATE TABLE ai_keys ("
+        " user_id TEXT NOT NULL, provider TEXT NOT NULL,"
+        " key_encrypted TEXT NOT NULL, masked TEXT NOT NULL,"
+        " created_at TEXT NOT NULL, updated_at TEXT NOT NULL,"
+        " PRIMARY KEY (user_id, provider))"
+    )
+    conn.execute(
+        "INSERT INTO ai_keys (user_id, provider, key_encrypted, masked, created_at, updated_at)"
+        " SELECT user_id, 'deepseek', key_encrypted, masked, created_at, updated_at"
+        " FROM ai_keys_legacy"
+    )
+    if "model" in columns:
+        conn.execute(
+            "INSERT OR IGNORE INTO ai_prefs (user_id, provider, model, updated_at)"
+            " SELECT user_id, 'deepseek', model, updated_at FROM ai_keys_legacy"
+            " WHERE model IS NOT NULL AND model != ''"
+        )
+    conn.execute("DROP TABLE ai_keys_legacy")
 
 
 def get_user_by_username(username: str) -> Optional[dict]:
@@ -339,28 +375,57 @@ def delete_connection(user_id: str, connection_id: str) -> bool:
 # ai_jobs 复刻 runs/datagen_jobs 的状态机：pending → running → finished/failed，
 # 平台重启时由 recover_ai_orphans() 统一标记失败。
 
-def upsert_ai_key(user_id: str, key_encrypted: str, masked: str) -> Optional[dict]:
+def upsert_ai_key(user_id: str, provider: str, key_encrypted: str,
+                  masked: str) -> Optional[dict]:
     now = datetime.now().isoformat(timespec="seconds")
     with tx() as conn:
         conn.execute(
-            "INSERT INTO ai_keys (user_id,key_encrypted,masked,created_at,updated_at)"
-            " VALUES (?,?,?,?,?)"
-            " ON CONFLICT(user_id) DO UPDATE SET"
+            "INSERT INTO ai_keys (user_id,provider,key_encrypted,masked,created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(user_id,provider) DO UPDATE SET"
             " key_encrypted=excluded.key_encrypted, masked=excluded.masked,"
             " updated_at=excluded.updated_at",
-            (user_id, key_encrypted, masked, now, now),
+            (user_id, provider, key_encrypted, masked, now, now),
         )
-    return get_ai_key(user_id)
+    return get_ai_key(user_id, provider)
 
 
-def get_ai_key(user_id: str) -> Optional[dict]:
-    row = _fetch_one("SELECT * FROM ai_keys WHERE user_id=?", (user_id,))
+def get_ai_key(user_id: str, provider: str = "deepseek") -> Optional[dict]:
+    row = _fetch_one(
+        "SELECT * FROM ai_keys WHERE user_id=? AND provider=?", (user_id, provider))
     return dict(row) if row else None
 
 
-def delete_ai_key(user_id: str) -> bool:
+def list_ai_keys(user_id: str) -> list:
+    rows = _fetch_all("SELECT * FROM ai_keys WHERE user_id=?", (user_id,))
+    return [dict(r) for r in rows]
+
+
+def set_ai_pref(user_id: str, provider: str, model: Optional[str]) -> None:
+    """记录当前选择的厂商与模型（只换模型时不动密钥）。"""
+    now = datetime.now().isoformat(timespec="seconds")
     with tx() as conn:
-        cur = conn.execute("DELETE FROM ai_keys WHERE user_id=?", (user_id,))
+        conn.execute(
+            "INSERT INTO ai_prefs (user_id,provider,model,updated_at) VALUES (?,?,?,?)"
+            " ON CONFLICT(user_id) DO UPDATE SET provider=excluded.provider,"
+            " model=excluded.model, updated_at=excluded.updated_at",
+            (user_id, provider, model, now),
+        )
+
+
+def get_ai_pref(user_id: str) -> Optional[dict]:
+    row = _fetch_one("SELECT * FROM ai_prefs WHERE user_id=?", (user_id,))
+    return dict(row) if row else None
+
+
+def delete_ai_key(user_id: str, provider: str = "deepseek") -> bool:
+    """清除该厂商的密钥（密文与掩码置空）；模型偏好保留在 ai_prefs。"""
+    with tx() as conn:
+        cur = conn.execute(
+            "UPDATE ai_keys SET key_encrypted='', masked='', updated_at=?"
+            " WHERE user_id=? AND provider=?",
+            (datetime.now().isoformat(timespec="seconds"), user_id, provider),
+        )
         return cur.rowcount > 0
 
 

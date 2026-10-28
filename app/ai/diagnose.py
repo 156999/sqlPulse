@@ -284,7 +284,10 @@ def diagnose_run(run_id, *, client=None, tool_registry=None, dry_run=False,
     return {"ok": True, "run_id": run_id, "data": {
         "mode": "fixed_workflow", "diagnosis": diagnosis.model_dump(),
         "evidence": evidence, "tool_status": states,
-        "model": data.get("model"), "usage": data.get("usage"),
+        "provider": data.get("provider"), "model": data.get("model"),
+        "finish_reason": data.get("finish_reason"),
+        "latency_ms": data.get("latency_ms"),
+        "usage": data.get("usage"), "usage_details": data.get("usage_details"),
         "budget": {"max_tokens": max_tokens, "text_char_limit": limit},
         "validation": "结构、证据引用存在性、完成状态已检查；引用是否支持结论仍需人工核对",
     }, "warnings": warnings, "error": None}

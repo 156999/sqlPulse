@@ -1,7 +1,9 @@
-"""SQLPulse 模型客户端（DeepSeek Chat Completions）。
+"""SQLPulse 模型客户端（OpenAI 兼容 Chat Completions）。
 
-只支持一种协议：``POST {base_url}/chat/completions``，``Authorization: Bearer <key>``。
-不声称兼容其它 "OpenAI-compatible" 服务，换服务商需要另写适配。
+支持 DeepSeek（基线）与 OpenAI 兼容厂商（Qwen / MiMo）：``POST {base_url}/chat/completions``。
+厂商差异（base_url、模型白名单、token 字段名、思考参数、JSON 模式）由
+``app/ai/providers.py`` 的 ProviderSpec 描述，本模块按能力组装请求；不传
+``provider_key`` 时保持 DeepSeek 原有行为。
 以下为 2026-09 官方文档（api-docs.deepseek.com）中与本模块相关的要点：
 
 - 模型名：``deepseek-flash`` / ``deepseek-v4-pro``。
@@ -33,6 +35,8 @@ from typing import Any, Optional
 
 import httpx
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.ai.providers import PROVIDERS
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -68,6 +72,8 @@ class LlmConfig(BaseSettings):
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-flash"
+    # 空 = DeepSeek 基线（CLI 默认）；网页端按用户选择传入厂商 key
+    provider_key: str = ""
     timeout_seconds: float = 60.0
     max_retries: int = 2
     # 以下三项留空表示用服务端默认（思考模式 enabled / effort high / 输出上限默认值）
@@ -99,6 +105,26 @@ def _redact(text: Any, secrets=()) -> str:
         if s and s in out:
             out = out.replace(s, "***")
     return out
+
+
+def _usage_details(usage) -> dict:
+    """把各厂商 usage 归一成固定字段；缺失一律 None，不影响主流程。"""
+    usage = usage if isinstance(usage, dict) else {}
+    completion_details = usage.get("completion_tokens_details")
+    prompt_details = usage.get("prompt_tokens_details")
+    cached = (prompt_details.get("cached_tokens")
+              if isinstance(prompt_details, dict) else None)
+    if cached is None:
+        cached = usage.get("prompt_cache_hit_tokens")  # DeepSeek 的字段名
+    reasoning = (completion_details.get("reasoning_tokens")
+                 if isinstance(completion_details, dict) else None)
+    return {
+        "input_tokens": usage.get("prompt_tokens"),
+        "output_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "reasoning_tokens": reasoning,
+        "cached_tokens": cached,
+    }
 
 
 def _ok(data: dict, warnings: Optional[list] = None) -> dict:
@@ -208,6 +234,10 @@ class LlmClient:
 
     # ---- 请求构造与校验 ----
 
+    def _spec(self):
+        key = (self.config.provider_key or "").strip()
+        return PROVIDERS.get(key) if key else None
+
     def _endpoint(self) -> str:
         base = (self.config.base_url or "").strip().rstrip("/")
         if base.endswith(CHAT_PATH):
@@ -257,40 +287,71 @@ class LlmClient:
         if tool_choice is not None and not isinstance(tool_choice, (str, dict)):
             return None, _fail("LLM_INVALID_REQUEST", "tool_choice 必须是字符串或对象", False)
 
-        eff_thinking = thinking if thinking is not None else self.config.thinking
-        if eff_thinking is not None and eff_thinking not in THINKING_VALUES:
-            return None, _fail(
-                "LLM_INVALID_REQUEST",
-                f"thinking={eff_thinking!r} 非法，取值：{', '.join(THINKING_VALUES)}", False,
-            )
-        eff_effort = reasoning_effort if reasoning_effort is not None else self.config.reasoning_effort
-        if eff_effort is not None and eff_effort not in EFFORT_VALUES:
-            return None, _fail(
-                "LLM_INVALID_REQUEST",
-                f"reasoning_effort={eff_effort!r} 非法，取值：{', '.join(EFFORT_VALUES)}", False,
-            )
+        spec = self._spec()
+        warnings: list = []
+        style = spec.thinking_style if spec is not None else "deepseek"
+
+        if style == "deepseek":
+            eff_thinking = thinking if thinking is not None else self.config.thinking
+            eff_thinking = eff_thinking or "enabled"
+            if eff_thinking not in THINKING_VALUES:
+                return None, warnings, _fail(
+                    "LLM_INVALID_REQUEST",
+                    f"thinking={eff_thinking!r} 非法，取值：{', '.join(THINKING_VALUES)}", False,
+                )
+            eff_effort = (reasoning_effort if reasoning_effort is not None
+                          else self.config.reasoning_effort)
+            if eff_effort is not None and eff_effort not in EFFORT_VALUES:
+                return None, warnings, _fail(
+                    "LLM_INVALID_REQUEST",
+                    f"reasoning_effort={eff_effort!r} 非法，取值：{', '.join(EFFORT_VALUES)}", False,
+                )
+        elif style in ("thinking_object", "qwen"):
+            # 这些厂商默认开启思考；诊断场景显式关闭（Qwen 非流式 JSON 也要求关闭）。
+            # 不读取 LLM_THINKING（那是 DeepSeek 基线的环境配置），避免跨厂商串味。
+            eff_thinking = thinking if thinking is not None else "disabled"
+            if eff_thinking not in THINKING_VALUES:
+                return None, warnings, _fail(
+                    "LLM_INVALID_REQUEST",
+                    f"thinking={eff_thinking!r} 非法，取值：{', '.join(THINKING_VALUES)}", False,
+                )
+            eff_effort = None
+        else:  # none：不发送任何思考参数
+            if thinking is not None and thinking != "disabled":
+                return None, warnings, _fail(
+                    "LLM_INVALID_REQUEST", "该模型不支持 thinking 参数", False)
+            eff_thinking = None
+            eff_effort = None
+
         eff_max_tokens = max_tokens if max_tokens is not None else self.config.max_tokens
+        token_limit = (spec.max_output_tokens
+                       if spec is not None and spec.max_output_tokens else MAX_TOKENS_LIMIT)
+        token_field = spec.token_limit_field if spec is not None else "max_tokens"
         if eff_max_tokens is not None:
             if not isinstance(eff_max_tokens, int) or isinstance(eff_max_tokens, bool):
-                return None, _fail("LLM_INVALID_REQUEST", "max_tokens 必须是整数", False)
-            if not 1 <= eff_max_tokens <= MAX_TOKENS_LIMIT:
-                return None, _fail(
+                return None, warnings, _fail("LLM_INVALID_REQUEST", "max_tokens 必须是整数", False)
+            if not 1 <= eff_max_tokens <= token_limit:
+                return None, warnings, _fail(
                     "LLM_INVALID_REQUEST",
-                    f"max_tokens 超出范围 1~{MAX_TOKENS_LIMIT}（收到 {eff_max_tokens}）", False,
+                    f"max_tokens 超出范围 1~{token_limit}（收到 {eff_max_tokens}）", False,
                 )
 
-        # 本版只支持 JSON 模式；其它取值一律按参数错误返回，不静默忽略
-        if response_format is not None:
+        # 只支持 JSON 模式；厂商未声明支持时省略该字段并告警（由调用方决定是否降级）
+        emit_response_format = response_format is not None
+        if emit_response_format:
             if not isinstance(response_format, dict) or response_format != {"type": "json_object"}:
-                return None, _fail(
+                return None, warnings, _fail(
                     "LLM_INVALID_REQUEST",
                     'response_format 本版只支持 {"type": "json_object"}', False,
                 )
+            if spec is not None and not spec.supports_json_mode:
+                warnings.append(f"{spec.label} 未声明 JSON 模式支持，已省略 response_format")
+                emit_response_format = False
 
         # 思考模式（含服务端默认开启的情况）不支持 required 与指定具体工具
         forced = tool_choice == "required" or isinstance(tool_choice, dict)
-        if forced and eff_thinking != "disabled":
-            return None, _fail(
+        if forced and eff_thinking != "disabled" and style in ("deepseek", "thinking_object"):
+            return None, warnings, _fail(
                 "LLM_INVALID_REQUEST",
                 "思考模式下 tool_choice 只支持 none / auto；"
                 "需要强制调用工具请先设置 thinking=disabled", False,
@@ -299,20 +360,25 @@ class LlmClient:
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
-            # 显式发送，避免依赖服务端默认值的变化
-            "thinking": {"type": eff_thinking or "enabled"},
             "stream": False,
         }
-        if eff_effort is not None:
-            payload["reasoning_effort"] = eff_effort
+        if style == "deepseek":
+            # 显式发送，避免依赖服务端默认值的变化
+            payload["thinking"] = {"type": eff_thinking}
+            if eff_effort is not None:
+                payload["reasoning_effort"] = eff_effort
+        elif style == "thinking_object":
+            payload["thinking"] = {"type": eff_thinking}
+        elif style == "qwen":
+            payload["enable_thinking"] = eff_thinking != "disabled"
         if eff_max_tokens is not None:
-            payload["max_tokens"] = eff_max_tokens
-        if response_format is not None:
+            payload[token_field] = eff_max_tokens
+        if emit_response_format:
             payload["response_format"] = response_format
         if tools is not None:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
-        return payload, None
+        return payload, warnings, None
 
     # ---- 发送与解析 ----
 
@@ -405,11 +471,15 @@ class LlmClient:
         自行要求输出 JSON。
         """
         if not self.config.api_key:
-            return _fail("LLM_CONFIG_ERROR", "未配置 LLM_API_KEY，无法调用模型", False)
+            return _fail("LLM_CONFIG_ERROR", "未配置模型 API Key，无法调用模型", False)
         if not self.config.base_url:
             return _fail("LLM_CONFIG_ERROR", "未配置 LLM_BASE_URL", False)
+        spec = self._spec()
+        if self.config.provider_key and spec is None:
+            return _fail("LLM_CONFIG_ERROR",
+                         f"未知的模型厂商：{self.config.provider_key}", False)
 
-        payload, err = self._build_payload(
+        payload, payload_warnings, err = self._build_payload(
             messages, tools, tool_choice, thinking, reasoning_effort, max_tokens,
             response_format,
         )
@@ -417,13 +487,15 @@ class LlmClient:
             return err
 
         url = self._endpoint()
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if spec is not None and spec.auth_style == "x-api-key":
+            headers["x-api-key"] = self.config.api_key
+        else:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
         secrets = (self.config.api_key,)
         attempts = max(0, int(self.config.max_retries)) + 1
         result = _fail("LLM_CLIENT_ERROR", "未发起请求", False)
+        started = time.perf_counter()
 
         for attempt in range(attempts):
             retry_after = None
@@ -446,7 +518,16 @@ class LlmClient:
                 )
             else:
                 if resp.status_code == 200:
-                    return self._parse_response(resp)
+                    result = self._parse_response(resp)
+                    data = result.get("data")
+                    if isinstance(data, dict):
+                        data["latency_ms"] = int((time.perf_counter() - started) * 1000)
+                        data["attempts"] = attempt + 1
+                        data["provider"] = spec.key if spec is not None else "deepseek"
+                        data["usage_details"] = _usage_details(data.get("usage"))
+                    if payload_warnings:
+                        result["warnings"].extend(payload_warnings)
+                    return result
                 result = self._http_error(resp, secrets)
                 if not result["error"]["retryable"]:
                     return result
@@ -458,6 +539,8 @@ class LlmClient:
                     delay = max(delay, retry_after)
                 time.sleep(delay)
 
+        if payload_warnings:
+            result["warnings"].extend(payload_warnings)
         if attempts > 1:
             result["warnings"].append(f"已重试 {attempts - 1} 次仍未成功")
         return result

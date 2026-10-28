@@ -2,8 +2,8 @@
 
 用法：
     python -m app.ai.verify_llm_client [--prompt TEXT] [--tool-loop] [--check-errors]
-                                       [--skip-chat] [--base-url URL] [--model NAME]
-                                       [--timeout-seconds N] [--max-retries N]
+                                       [--skip-chat] [--provider NAME] [--base-url URL]
+                                       [--model NAME] [--timeout-seconds N] [--max-retries N]
 
 - 默认动作：打印配置快照（不含密钥），做一次普通文本往返。
 - --tool-loop   额外做一次工具调用往返：模型要求调用工具 → 回传工具结果 → 取最终回答。
@@ -28,6 +28,7 @@ import time
 from app.ai.llm_client import (
     LlmClient, LlmConfig, assistant_message, tool_result_message,
 )
+from app.ai.providers import PROVIDERS, resolve_base_url
 
 # 只用于验证的合成工具定义与合成工具结果：不是 SQLPulse 的真实工具，也不会被执行
 DEMO_TOOL = {
@@ -242,6 +243,8 @@ def main(argv=None) -> int:
     parser.add_argument("--skip-chat", action="store_true", help="跳过普通文本往返")
     parser.add_argument("--base-url", default=None, help="覆盖 LLM_BASE_URL")
     parser.add_argument("--model", default=None, help="覆盖 LLM_MODEL")
+    parser.add_argument("--provider", choices=sorted(PROVIDERS), default=None,
+                        help="按厂商能力发请求（缺省 DeepSeek 基线）；未给 --model 时用该厂商首个模型")
     parser.add_argument("--timeout-seconds", type=float, default=None, help="覆盖 LLM_TIMEOUT_SECONDS")
     parser.add_argument("--max-retries", type=int, default=None, help="覆盖 LLM_MAX_RETRIES")
     args = parser.parse_args(argv)
@@ -250,6 +253,13 @@ def main(argv=None) -> int:
         "base_url": args.base_url, "model": args.model,
         "timeout_seconds": args.timeout_seconds, "max_retries": args.max_retries,
     }
+    if args.provider:
+        spec = PROVIDERS[args.provider]
+        overrides["provider_key"] = spec.key
+        if args.model is None:
+            overrides["model"] = spec.models[0]
+        if args.base_url is None:
+            overrides["base_url"] = resolve_base_url(spec)
     try:
         config = LlmConfig(**{k: v for k, v in overrides.items() if v is not None})
     except Exception as e:  # 配置本身非法（如超时不是数字）

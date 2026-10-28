@@ -9,10 +9,10 @@
 <p>
 {% if ai.source == 'user' %}
   当前密钥：<code>{{ ai.masked }}</code>
-  <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }} · 费用由该密钥承担</span>
+  <span class="muted">{{ ai.provider_label }} · 模型 {{ ai.model }} · 请求 {{ ai.base_url_host }} · 费用由该密钥承担</span>
 {% elif ai.source == 'server' %}
   将使用服务器默认密钥 <code>{{ ai.masked }}</code>
-  <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }}</span>
+  <span class="muted">{{ ai.provider_label }} · 模型 {{ ai.model }} · 请求 {{ ai.base_url_host }}</span>
 {% elif ai.source == 'broken' %}
   <span class="err-msg">已保存的密钥无法解密（APP_SECRET_KEY 可能已更换）。</span>
   <a href="/profile#ai-key">去用户信息页重新填写 →</a>

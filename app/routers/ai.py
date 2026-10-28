@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse
 
 from app import db
 from app.ai import diagnose_runner, key_store
+from app.ai.providers import PROVIDERS, parse_model_value
 from app.auth import require_user
 from app.routers.pages import _profile_context
 from app.services import connection_manager
@@ -23,21 +24,61 @@ def _user_id(user: Optional[dict]) -> str:
 
 
 @router.post("/api/ai/key")
-def save_ai_key(request: Request, api_key: str = Form(""),
+def save_ai_key(request: Request, api_key: str = Form(""), model: str = Form(""),
+                provider: str = Form(""),
                 user: Optional[dict] = Depends(require_user)):
     key_store.warn_default_secret()
     api_key = api_key.strip()
-    error = key_store.validate(api_key)
-    if error:
-        ctx = _profile_context(request, error)
+    raw = model.strip()
+    provider_key = provider.strip()
+
+    # 页面提交 "provider|model"；兼容旧的分离字段（provider + model）
+    if "|" in raw:
+        spec, model_id = parse_model_value(raw)
+    else:
+        spec = PROVIDERS.get(provider_key or "deepseek")
+        model_id = raw or (spec.models[0] if spec and spec.models else "")
+        if spec is None or model_id not in spec.models:
+            spec = None
+    if spec is None:
+        ctx = _profile_context(request, f"不支持的厂商或模型：{raw or provider_key}")
         return templates.TemplateResponse(request, "profile.html", ctx, status_code=400)
-    db.upsert_ai_key(_user_id(user), key_store.encrypt(api_key), key_store.mask(api_key))
-    return RedirectResponse("/profile#ai-key", status_code=303)
+
+    user_id = _user_id(user)
+    existing = db.get_ai_key(user_id, spec.key)
+
+    if api_key:
+        error = key_store.validate(api_key)
+        if error:
+            ctx = _profile_context(request, error)
+            return templates.TemplateResponse(request, "profile.html", ctx, status_code=400)
+        db.upsert_ai_key(user_id, spec.key, key_store.encrypt(api_key),
+                         key_store.mask(api_key))
+        db.set_ai_pref(user_id, spec.key, model_id)
+        return RedirectResponse("/profile#ai-key", status_code=303)
+
+    # 密钥留空：只更新偏好（要求该厂商已有可用密钥，或 DeepSeek 有服务器默认 key）
+    if existing and existing.get("key_encrypted"):
+        if key_store.decrypt(existing["key_encrypted"]) is None:
+            error = "已保存的密钥无法解密，请重新填写"
+        else:
+            db.set_ai_pref(user_id, spec.key, model_id)
+            return RedirectResponse("/profile#ai-key", status_code=303)
+    elif diagnose_runner.has_server_key(spec.key):
+        db.set_ai_pref(user_id, spec.key, model_id)
+        return RedirectResponse("/profile#ai-key", status_code=303)
+    else:
+        error = f"{spec.label} 首次配置需要填写 API Key"
+    ctx = _profile_context(request, error)
+    return templates.TemplateResponse(request, "profile.html", ctx, status_code=400)
 
 
 @router.post("/api/ai/key/delete")
-def delete_ai_key(user: Optional[dict] = Depends(require_user)):
-    db.delete_ai_key(_user_id(user))
+def delete_ai_key(provider: str = Form(""), user: Optional[dict] = Depends(require_user)):
+    spec = PROVIDERS.get(provider.strip())
+    if spec is None:
+        raise HTTPException(status_code=400, detail="不支持的厂商")
+    db.delete_ai_key(_user_id(user), spec.key)
     return RedirectResponse("/profile#ai-key", status_code=303)
 
 

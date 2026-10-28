@@ -191,3 +191,6 @@ details.card summary { cursor: pointer; font-weight: 600; color: #374151; }
 .ai-key-form input { flex: 1; max-width: 420px; }
 .ai-diag-area { margin-top: 10px; }
 .ai-diag-area .advice code { margin-right: 4px; }
+.ai-key-form select { max-width: 190px; }
+.ai-key-inline { display: inline; margin: 0; }
+.ai-key-inline button { padding: 2px 10px; }

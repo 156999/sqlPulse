@@ -7,16 +7,39 @@ from fastapi.responses import StreamingResponse
 from app import db
 from app.config import settings
 from app.services.collector import collector, read_per_sql_history
+from app.services.observability import build_event_timeline, build_snapshot, capacity_thresholds
 
 router = APIRouter()
 
 
 @router.get("/api/runs/{run_id}/metrics")
 def get_metrics(run_id: str, ts_from: int = None, ts_to: int = None):
-    if not db.get_run(run_id):
+    run = db.get_run(run_id)
+    if not run:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
     points = db.get_metrics(run_id, ts_from, ts_to)
-    return {"points": points}
+    observability = build_snapshot(run, points)
+    observability["metrics_points"] = len(points)
+    return {
+        "points": points,
+        "window_scope": "current_window",
+        "final_metrics": observability.get("final_metrics"),
+        "observability": observability,
+        "events": build_event_timeline(points),
+    }
+
+
+@router.get("/api/runs/{run_id}/events")
+def get_events(run_id: str):
+    if not db.get_run(run_id):
+        raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
+    points = db.get_metrics(run_id)
+    return {
+        "run_id": run_id,
+        "events": build_event_timeline(points),
+        "thresholds": capacity_thresholds(),
+        "metrics_points": len(points),
+    }
 
 
 @router.get("/api/runs/{run_id}/per-sql-metrics")

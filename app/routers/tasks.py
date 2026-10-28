@@ -12,6 +12,7 @@ from app.models import DbDsn, TaskCreate, SqlInput, FormTools, PreviewResult, Sm
 from app.services import connection_manager
 from app.services.credential_crypto import encrypt_dsn_snapshot
 from app.services.runner import now_iso, runner, parse_sql_tasks
+from app.services.observability import build_snapshot
 from app.services.run_form import prepare, preview, form_tools, FormError
 from app.services.datagen_rules import read_table_metadata
 from app.services.smart_completion import suggest
@@ -125,6 +126,7 @@ def get_run(run_id: str):
     run = db.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
+    observability = build_snapshot(run, db.get_metrics(run_id))
     return {
         "groups": json.loads(run.get("groups_json") or "[]"),
         "variables": json.loads(run.get("variables_json") or "{}"),
@@ -133,4 +135,8 @@ def get_run(run_id: str):
         "spawn_rate": run["spawn_rate"], "duration_sec": run["duration_sec"],
         "error_msg": run["error_msg"], "created_at": run["created_at"],
         "started_at": run["started_at"], "ended_at": run["ended_at"],
+        "process_exit_code": run.get("process_exit_code"),
+        "finalized_at": run.get("finalized_at"),
+        "final_metrics": observability.get("final_metrics"),
+        "observability": observability,
     }

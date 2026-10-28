@@ -16,6 +16,7 @@ from app import db
 from app.config import settings
 from app.services import explain_probe
 from app.services.credential_crypto import decrypt_dsn_snapshot
+from app.services.observability import finalize_run
 from app.services.sql_params import tokens, compile_tasks
 
 WEIGHT_RE = re.compile(r"^\s*--\s*weight:\s*(\d+)", re.IGNORECASE)
@@ -220,12 +221,18 @@ class LocustRunner:
             if code == 0:
                 all_fail = self._all_failed(run_id)
                 if all_fail:
-                    db.update_run(run_id, {"status": "failed", "error_msg": "所有请求均失败：SQL 语法/权限/表不存在错误", "ended_at": now_iso()})
+                    db.update_run(run_id, {"status": "failed", "error_msg": "所有请求均失败：请检查 SQL、权限或目标对象", "ended_at": now_iso()})
                 else:
                     db.update_run(run_id, {"status": "finished", "ended_at": now_iso()})
             else:
                 err = _tail(settings.logs_dir / f"locust_{run_id}.log")
                 db.update_run(run_id, {"status": "failed", "error_msg": err or f"locust 退出码 {code}", "ended_at": now_iso()})
+        db.update_run(run_id, {"process_exit_code": code})
+        run = db.get_run(run_id)
+        try:
+            finalize_run(run, process_exit_code=code)
+        except Exception as e:
+            logger.exception("observability finalization failed for {}: {}", run_id, e)
         logger.info("run {} exited code={} status={}", run_id, code, db.get_run(run_id)["status"])
         # 采集必须在 `_on_finish`（= 生成报告）**之前**：报告侧要读产物，
         # 顺序反了就会读到 None。顺序由这个位置保证，别往下挪。

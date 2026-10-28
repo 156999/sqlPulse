@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS runs (
   duration_sec  INTEGER NOT NULL,
   db_dsn_json   TEXT NOT NULL,
   error_msg     TEXT,
+  process_exit_code INTEGER,
+  final_metrics_json TEXT,
+  observability_json TEXT,
+  finalized_at TEXT,
   created_at    TEXT NOT NULL,
   started_at    TEXT,
   ended_at      TEXT
@@ -43,11 +47,38 @@ CREATE TABLE IF NOT EXISTS metrics (
   err_rate      REAL,
   threads_running   INTEGER,
   threads_connected INTEGER,
+  max_connections INTEGER,
+  active_users INTEGER,
+  connection_usage_pct REAL,
   mysql_qps     REAL,
   slow_inc      REAL,
   lock_waits_inc REAL,
+  lock_wait_ms_inc REAL,
+  lock_current_waits INTEGER,
+  deadlocks_inc REAL,
+  innodb_log_waits_inc REAL,
+  innodb_log_writes_inc REAL,
+  innodb_log_write_requests_inc REAL,
+  innodb_log_pending_fsyncs INTEGER,
+  innodb_log_pending_writes INTEGER,
   tmp_disk_inc  REAL,
   bufpool_hit   REAL,
+  cpu_pct REAL,
+  memory_pct REAL,
+  memory_used_mb REAL,
+  disk_used_pct REAL,
+  disk_read_mb_s REAL,
+  disk_write_mb_s REAL,
+  net_recv_mb_s REAL,
+  net_sent_mb_s REAL,
+  metric_scope  TEXT NOT NULL DEFAULT 'window',
+  request_count INTEGER,
+  request_failures INTEGER,
+  exception_count INTEGER,
+  user_start_failures INTEGER,
+  failure_events INTEGER,
+  top_exception_message TEXT,
+  top_exception_count INTEGER,
   PRIMARY KEY (run_id, ts)
 );
 CREATE TABLE IF NOT EXISTS reports (
@@ -173,13 +204,36 @@ def _fetch_all(sql: str, args: tuple = ()) -> list:
 
 _METRIC_COLS = [
     "qps", "avg_ms", "p95_ms", "p99_ms", "err_rate",
-    "threads_running", "threads_connected",
-    "mysql_qps", "slow_inc", "lock_waits_inc", "tmp_disk_inc", "bufpool_hit",
+    "threads_running", "threads_connected", "max_connections", "active_users", "connection_usage_pct",
+    "mysql_qps", "slow_inc", "lock_waits_inc", "lock_wait_ms_inc", "lock_current_waits",
+    "deadlocks_inc", "innodb_log_waits_inc", "innodb_log_writes_inc", "innodb_log_write_requests_inc",
+    "innodb_log_pending_fsyncs", "innodb_log_pending_writes", "tmp_disk_inc", "bufpool_hit",
+    "cpu_pct", "memory_pct", "memory_used_mb", "disk_used_pct", "disk_read_mb_s", "disk_write_mb_s",
+    "net_recv_mb_s", "net_sent_mb_s",
+    "metric_scope", "request_count", "request_failures", "exception_count",
+    "user_start_failures", "failure_events", "top_exception_message", "top_exception_count",
 ]
 # 旧库升级：缺列则补
 _METRIC_ALTERS = {
-    "mysql_qps": "REAL", "slow_inc": "REAL", "lock_waits_inc": "REAL",
+    "max_connections": "INTEGER", "active_users": "INTEGER", "connection_usage_pct": "REAL",
+    "mysql_qps": "REAL", "slow_inc": "REAL", "lock_waits_inc": "REAL", "lock_wait_ms_inc": "REAL",
+    "lock_current_waits": "INTEGER", "deadlocks_inc": "REAL", "innodb_log_waits_inc": "REAL",
+    "innodb_log_writes_inc": "REAL", "innodb_log_write_requests_inc": "REAL",
+    "innodb_log_pending_fsyncs": "INTEGER", "innodb_log_pending_writes": "INTEGER",
     "tmp_disk_inc": "REAL", "bufpool_hit": "REAL",
+    "cpu_pct": "REAL", "memory_pct": "REAL", "memory_used_mb": "REAL", "disk_used_pct": "REAL",
+    "disk_read_mb_s": "REAL", "disk_write_mb_s": "REAL", "net_recv_mb_s": "REAL", "net_sent_mb_s": "REAL",
+    "metric_scope": "TEXT NOT NULL DEFAULT 'window'",
+    "request_count": "INTEGER", "request_failures": "INTEGER",
+    "exception_count": "INTEGER", "user_start_failures": "INTEGER",
+    "failure_events": "INTEGER", "top_exception_message": "TEXT",
+    "top_exception_count": "INTEGER",
+}
+
+# These columns were used by the removed collection-quality view.  Older
+# SQLite databases may still contain them; keep them out of the API surface.
+_REMOVED_METRIC_COLS = {
+    "source_ts", "sample_age_ms", "stale", "collection_error", "sample_interval_s",
 }
 
 
@@ -191,6 +245,14 @@ def init_schema() -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN groups_json TEXT NOT NULL DEFAULT '[]'")
         if "variables_json" not in run_columns:
             conn.execute("ALTER TABLE runs ADD COLUMN variables_json TEXT NOT NULL DEFAULT '{}'")
+        for col, typ in {
+            "process_exit_code": "INTEGER",
+            "final_metrics_json": "TEXT",
+            "observability_json": "TEXT",
+            "finalized_at": "TEXT",
+        }.items():
+            if col not in run_columns:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {typ}")
         connection_columns = {r[1] for r in conn.execute("PRAGMA table_info(mysql_connections)")}
         if "password_ciphertext" not in connection_columns:
             conn.execute("ALTER TABLE mysql_connections ADD COLUMN password_ciphertext TEXT")
@@ -535,7 +597,11 @@ def get_metrics(run_id: str, ts_from: Optional[int] = None, ts_to: Optional[int]
         sql += " AND ts<=?"
         args.append(ts_to)
     sql += " ORDER BY ts"
-    return [dict(r) for r in _fetch_all(sql, tuple(args))]
+    points = [dict(r) for r in _fetch_all(sql, tuple(args))]
+    for point in points:
+        for col in _REMOVED_METRIC_COLS:
+            point.pop(col, None)
+    return points
 
 
 def save_report(run_id: str, l0: dict, l1: list, md_path: str) -> None:

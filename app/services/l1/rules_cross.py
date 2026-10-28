@@ -4,6 +4,8 @@ X 规则要求 ≥2 个来源同时命中才输出"根因"，每条带证据三�
 （账本 + 引擎 + 计划）。命中后吸收构成它的基础规则（CONSUMES），
 避免"同一件事说三遍"。
 """
+
+import json
 from app.services.l1.contract import Action, Evidence, Finding, META_RULES
 from app.services.l1.rules_plan import plan_indexes, plan_healthy
 
@@ -34,7 +36,8 @@ def apply_cross(inp, th, base_findings: list, comp: dict) -> list:
     out += _x5(inp, th, hits)
     out += _x6(inp, th, hits)
     out += _x7(inp)
-    out += _x8(base_findings, comp)
+    if inp.run.get("status") not in ("failed", "cancelled"):
+        out += _x8(base_findings, comp)
     return out
 
 
@@ -211,16 +214,27 @@ def _x6(inp, th, hits):
 
 
 def _x7(inp):
-    """SQL 本身不可执行 —— 不是性能问题，压测无效。"""
+    """明确的 SQL 请求失败才判定为不可执行。
+
+    进程失败或用户初始化阶段连接失败不等于 SQL 语法/权限错误；这些
+    情况必须保留为部分有效结果，避免把连接容量问题误报成 SQL 不可执行。
+    """
     led = inp.ledger
     err = led.get("err_rate")
-    failed = inp.run.get("status") == "failed"
-    if (err is not None and err >= 0.99) or failed:
+    obs = {}
+    try:
+        obs = json.loads(inp.run.get("observability_json") or "{}")
+    except (TypeError, ValueError):
+        pass
+    error_kind = obs.get("error_kind")
+    sql_failure = error_kind == "sql_request_failure"
+    legacy_failed = inp.run.get("status") == "failed" and not obs
+    if (err is not None and err >= 0.99) or (sql_failure and err is not None and err >= 0.5) or legacy_failed:
         ev = []
         if err is not None:
             ev.append(Evidence("ledger", "错误率", f"{err:.2%}", ""))
-        if failed:
-            ev.append(Evidence("ledger", "任务状态", "failed",
+        if sql_failure:
+            ev.append(Evidence("ledger", "失败类型", "SQL 请求失败",
                                inp.run.get("error_msg") or ""))
         return [Finding(
             rule_id="X7_root_not_executable", layer="cross", severity="error",

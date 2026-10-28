@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     l1_min_points: int = 3
     l1_max_rows: int = 10000
 
+    # ---- 第二阶段容量观测阈值 ----
+    capacity_cpu_warn_pct: float = 80.0
+    capacity_memory_warn_pct: float = 85.0
+    capacity_disk_warn_pct: float = 90.0
+    capacity_connection_warn_pct: float = 80.0
+    capacity_lock_wait_ms_warn: float = 1000.0
+    capacity_deadlocks_warn: float = 1.0
+    capacity_log_waits_warn: float = 1.0
+    capacity_p99_warn_ms: float = 500.0
+
     auth_enabled: bool = True
     app_secret_key: str = ""
     auth_session_ttl_seconds: int = 604800

@@ -116,6 +116,10 @@ class RunOut(BaseModel):
     spawn_rate: int
     duration_sec: int
     error_msg: Optional[str] = None
+    process_exit_code: Optional[int] = None
+    finalized_at: Optional[str] = None
+    final_metrics: Optional[dict] = None
+    observability: Optional[dict] = None
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
@@ -130,6 +134,14 @@ class MetricPoint(BaseModel):
     err_rate: Optional[float] = None
     threads_running: Optional[int] = None
     threads_connected: Optional[int] = None
+    metric_scope: str = "window"
+    request_count: Optional[int] = None
+    request_failures: Optional[int] = None
+    exception_count: Optional[int] = None
+    user_start_failures: Optional[int] = None
+    failure_events: Optional[int] = None
+    top_exception_message: Optional[str] = None
+    top_exception_count: Optional[int] = None
 
 
 class DataGenJobCreate(BaseModel):

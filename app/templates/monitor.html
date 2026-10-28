@@ -9,9 +9,34 @@
   <span>并发：{{ run.concurrency }}</span>
   <span>计划时长：{{ run.duration_sec }}s</span>
   <span>已运行：<span id="elapsed">-</span></span>
+  <span>采集：<span id="collector-state" class="badge badge-running">连接中</span></span>
   <button id="btn-stop" class="danger">停止</button>
   <a id="link-report" href="/runs/{{ run.id }}/report" class="primary" style="display:none">查看报告</a>
 </div>
+
+<div id="quality-banner" class="card advice advice-info">
+  <strong>结果质量：<span id="quality-label">{{ observability.quality }}</span></strong>
+  <span id="quality-reason" class="muted">{{ observability.quality_reason }}</span>
+  <span id="error-kind" class="muted"></span>
+</div>
+
+<div class="grid4 observability-cards">
+  <div class="card obs-card"><span class="muted">请求数</span><strong id="obs-request-count">-</strong></div>
+  <div class="card obs-card"><span class="muted">请求失败</span><strong id="obs-request-failures">-</strong></div>
+  <div class="card obs-card"><span class="muted">用户初始化失败</span><strong id="obs-start-failures">-</strong></div>
+  <div class="card obs-card"><span class="muted">异常总数</span><strong id="obs-exceptions">-</strong></div>
+  <div class="card obs-card"><span class="muted">最终累计 QPS</span><strong id="obs-final-qps">-</strong></div>
+  <div class="card obs-card"><span class="muted">最终累计 P99</span><strong id="obs-final-p99">-</strong></div>
+</div>
+
+<div class="grid4 observability-cards capacity-summary">
+  <div class="card obs-card"><span class="muted">当前连接数</span><strong id="obs-threads-connected">-</strong></div>
+  <div class="card obs-card"><span class="muted">最大连接数</span><strong id="obs-max-connections">-</strong></div>
+  <div class="card obs-card"><span class="muted">活跃用户数</span><strong id="obs-active-users">-</strong></div>
+  <div class="card obs-card"><span class="muted">连接占用率</span><strong id="obs-connection-usage">-</strong></div>
+</div>
+
+<div id="obs-detail" class="card muted">实时窗口指标覆盖成功建立连接的用户；最终累计指标在任务结束后从 Locust 汇总文件生成。</div>
 
 <details class="card" open>
   <summary>SQL 任务解析（{{ tasks|length }} 个任务 · 图表/报告中的 sql_id 对应如下）</summary>
@@ -35,40 +60,86 @@
 <h2 class="section-title">压测指标</h2>
 <div class="chart-stack">
   <div class="card chart-card">
-    <div class="chart-head"><h3>压测 QPS 与错误率</h3></div>
+    <div class="chart-head"><h3>压测 QPS 与请求错误率（当前窗口）</h3></div>
     <div class="chart-body"><canvas id="chart-qps"></canvas></div>
   </div>
   <div class="card chart-card">
-    <div class="chart-head"><h3>响应延迟（汇总）</h3></div>
-    <div class="chart-body"><canvas id="chart-latency"></canvas></div>
+    <div class="chart-head"><h3>平均响应延迟（当前窗口）</h3></div>
+    <div class="chart-body"><canvas id="chart-latency-avg"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>尾部响应延迟（P95 / P99）</h3></div>
+    <div class="chart-body"><canvas id="chart-latency-percentiles"></canvas></div>
   </div>
   <div class="card chart-card">
     <div class="chart-head">
       <h3>分语句响应延迟</h3>
-      <div class="seg">
+      <div class="chart-controls">
+        <label class="chart-select-label" for="persql-select">SQL</label>
+        <select id="persql-select" class="chart-select" aria-label="选择要显示的 SQL">
+          <option value="">等待数据</option>
+        </select>
+        <div class="seg">
         <button type="button" class="seg-btn" data-metric="p95">P95</button>
         <button type="button" class="seg-btn active" data-metric="p99">P99</button>
+        </div>
       </div>
     </div>
+    <div id="persql-hint" class="chart-hint">默认单独显示一条 SQL；选择“全部 SQL”可进行横向比较。</div>
     <div class="chart-body"><canvas id="chart-persql"></canvas></div>
   </div>
 </div>
 
 <h2 class="section-title">MySQL 引擎指标</h2>
-<div class="chart-stack">
+<div class="chart-grid engine-chart-grid">
   <div class="card chart-card">
     <div class="chart-head"><h3>连接数</h3></div>
     <div class="chart-body"><canvas id="chart-conn"></canvas></div>
   </div>
   <div class="card chart-card">
-    <div class="chart-head"><h3>引擎状态（QPS / 慢查询 / 行锁等待 / 磁盘临时表）</h3></div>
-    <div class="chart-body"><canvas id="chart-engine"></canvas></div>
+    <div class="chart-head"><h3>MySQL QPS</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-qps"></canvas></div>
   </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>慢查询增量</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-slow"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>行锁等待增量</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-lock"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>磁盘临时表增量</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-tmp"></canvas></div>
+  </div>
+</div>
+
+<h2 class="section-title">主机容量指标</h2>
+<div class="chart-grid capacity-chart-grid">
+  <div class="card chart-card"><div class="chart-head"><h3>主机 CPU 使用率</h3></div><div class="chart-body"><canvas id="chart-capacity-cpu"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>主机内存使用率</h3></div><div class="chart-body"><canvas id="chart-capacity-memory"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>主机磁盘使用率</h3></div><div class="chart-body"><canvas id="chart-capacity-disk"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>主机网络吞吐</h3></div><div class="chart-body"><canvas id="chart-capacity-network"></canvas></div></div>
+</div>
+
+<h2 class="section-title">数据库容量、锁与 InnoDB 日志</h2>
+<div class="chart-grid capacity-chart-grid">
+  <div class="card chart-card"><div class="chart-head"><h3>连接容量</h3></div><div class="chart-body"><canvas id="chart-db-connections"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>锁等待</h3></div><div class="chart-body"><canvas id="chart-db-locks"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>死锁</h3></div><div class="chart-body"><canvas id="chart-db-deadlocks"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>InnoDB 日志</h3></div><div class="chart-body"><canvas id="chart-db-log"></canvas></div></div>
+</div>
+
+<div class="card event-card">
+  <div class="chart-head"><h3>事件时间线与阈值告警</h3><span id="event-count" class="muted">-</span></div>
+  <div id="event-thresholds" class="threshold-list muted">阈值加载中…</div>
+  <ol id="event-timeline" class="event-timeline"><li class="muted">等待采集数据…</li></ol>
 </div>
 
 <script>
 const runId = '{{ run.id }}';
-const startedAt = Date.now();
+const runStartedAt = '{{ run.started_at or "" }}';
+const startedAt = runStartedAt ? new Date(runStartedAt).getTime() : Date.now();
 const maxPoints = 600;
 const charts = {};
 
@@ -86,8 +157,8 @@ function mkChart(id, datasets, opts) {
 }
 
 charts.qps = mkChart('chart-qps', [
-  {label: 'QPS（次/秒）', borderColor: '#2563eb', yAxisID: 'y'},
-  {label: '错误率（%）', borderColor: '#dc2626', yAxisID: 'y1', borderDash: [4, 3]}
+  {label: '当前窗口 QPS（次/秒）', borderColor: '#2563eb', yAxisID: 'y'},
+  {label: '请求错误率（%）', borderColor: '#dc2626', yAxisID: 'y1', borderDash: [4, 3]}
 ], {
   scales: {
     x: {ticks: {maxTicksLimit: 10}},
@@ -97,16 +168,24 @@ charts.qps = mkChart('chart-qps', [
          title: {display: true, text: '错误率（%）'}, ticks: {callback: v => (v * 100).toFixed(0) + '%'}}
   },
   plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
-    label: ctx => ctx.dataset.label === '错误率（%）'
+    label: ctx => ctx.dataset.label === '请求错误率（%）'
       ? ` 错误率：${(ctx.parsed.y * 100).toFixed(2)}%`
       : ` QPS：${ctx.parsed.y.toFixed(1)} 次/秒`
   }}}
 });
 
-charts.latency = mkChart('chart-latency', [
-  {label: 'avg', borderColor: '#0891b2'},
-  {label: 'P95', borderColor: '#d97706'},
-  {label: 'P99', borderColor: '#dc2626'}
+charts.latencyAvg = mkChart('chart-latency-avg', [
+  {label: '平均延迟', borderColor: '#0891b2'}
+], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: '平均延迟（ms）'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` 平均延迟：${ctx.parsed.y.toFixed(1)} ms`
+  }}}
+});
+
+charts.latencyPercentiles = mkChart('chart-latency-percentiles', [
+  {label: 'P95（当前窗口）', borderColor: '#d97706'},
+  {label: 'P99（当前窗口）', borderColor: '#dc2626'}
 ], {
   scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: '延迟（ms）'}}},
   plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
@@ -131,23 +210,69 @@ charts.conn = mkChart('chart-conn', [
   }}}
 });
 
-charts.engine = mkChart('chart-engine', [
-  {label: 'MySQL QPS（次/秒）', borderColor: '#0d9488', yAxisID: 'y'},
-  {label: '慢查询（次/秒）', borderColor: '#dc2626', yAxisID: 'y1'},
-  {label: '行锁等待（次/秒）', borderColor: '#d97706', yAxisID: 'y1', borderDash: [4, 3]},
-  {label: '磁盘临时表（次/秒）', borderColor: '#9333ea', yAxisID: 'y1', borderDash: [2, 2]}
-], {
-  scales: {
-    x: {ticks: {maxTicksLimit: 10}},
-    y: {beginAtZero: true, position: 'left', title: {display: true, text: 'MySQL QPS（次/秒）'}},
-    y1: {beginAtZero: true, position: 'right', precision: 0, grid: {drawOnChartArea: false},
-         title: {display: true, text: '事件次数（次/秒）'}}
-  },
-  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
-    label: ctx => ctx.dataset.label === 'MySQL QPS（次/秒）'
-      ? ` MySQL QPS：${ctx.parsed.y.toFixed(1)} 次/秒`
-      : ` ${ctx.dataset.label.replace(/（次\/秒）/, '')}：${ctx.parsed.y} 次/秒`
-  }}}
+function mkEngineChart(id, label, color, unit = '次/秒') {
+  return mkChart(id, [{label, borderColor: color}], {
+    scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: unit}}},
+    plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+      label: ctx => ` ${label}：${ctx.parsed.y.toFixed(1)} ${unit}`
+    }}}
+  });
+}
+
+charts.engineQps = mkEngineChart('chart-engine-qps', 'MySQL QPS', '#0d9488');
+charts.engineSlow = mkEngineChart('chart-engine-slow', '慢查询', '#dc2626');
+charts.engineLock = mkEngineChart('chart-engine-lock', '行锁等待', '#d97706');
+charts.engineTmp = mkEngineChart('chart-engine-tmp', '磁盘临时表', '#9333ea');
+
+function mkCapacityChart(id, datasets, yTitle, opts = {}) {
+  return mkChart(id, datasets, {
+    scales: {
+      x: {ticks: {maxTicksLimit: 10}},
+      y: {beginAtZero: true, title: {display: true, text: yTitle}, ...(opts.y || {})},
+      ...(opts.y1 ? {y1: {beginAtZero: true, position: 'right', grid: {drawOnChartArea: false}, ...opts.y1}} : {}),
+    },
+    plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+      label: ctx => ` ${ctx.dataset.label}：${ctx.parsed.y == null ? '无数据' : Number(ctx.parsed.y).toFixed(1)} ${ctx.dataset.unit || opts.unit || ''}`
+    }}},
+  });
+}
+
+charts.capacityCpu = mkCapacityChart('chart-capacity-cpu', [
+  {label: 'CPU', borderColor: '#2563eb'},
+], '使用率（%）', {unit: '%', y: {max: 100}});
+charts.capacityMemory = mkCapacityChart('chart-capacity-memory', [
+  {label: '内存', borderColor: '#059669'},
+], '使用率（%）', {unit: '%', y: {max: 100}});
+charts.capacityDisk = mkCapacityChart('chart-capacity-disk', [
+  {label: '磁盘', borderColor: '#d97706'},
+], '使用率（%）', {unit: '%', y: {max: 100}});
+charts.capacityNetwork = mkCapacityChart('chart-capacity-network', [
+  {label: '接收', borderColor: '#0891b2'},
+  {label: '发送', borderColor: '#9333ea'},
+], '吞吐（MB/s）', {unit: 'MB/s'});
+charts.dbConnections = mkCapacityChart('chart-db-connections', [
+  {label: '当前连接数', borderColor: '#7c3aed', unit: '个'},
+  {label: '最大连接数', borderColor: '#dc2626', borderDash: [5, 3], unit: '个'},
+  {label: '活跃用户数', borderColor: '#059669', unit: '个'},
+  {label: '连接占用率', borderColor: '#f59e0b', yAxisID: 'y1', unit: '%'},
+], '连接数（个）', {unit: '个', y1: {max: 100, title: {display: true, text: '占用率（%）'}}});
+charts.dbLocks = mkCapacityChart('chart-db-locks', [
+  {label: '锁等待次数', borderColor: '#d97706', yAxisID: 'y'},
+  {label: '锁等待时间', borderColor: '#dc2626', yAxisID: 'y1'},
+], '等待次数（次/s）', {
+  unit: '次/s',
+  y1: {title: {display: true, text: '等待时间（ms/s）'}},
+});
+charts.dbDeadlocks = mkCapacityChart('chart-db-deadlocks', [
+  {label: '死锁', borderColor: '#dc2626'},
+], '次数（次/s）', {unit: '次/s'});
+charts.dbLog = mkCapacityChart('chart-db-log', [
+  {label: '日志等待', borderColor: '#dc2626', yAxisID: 'y'},
+  {label: '日志写入', borderColor: '#0d9488', yAxisID: 'y1'},
+  {label: '日志写请求', borderColor: '#7c3aed', yAxisID: 'y1', borderDash: [4, 3]},
+], '等待次数（次/s）', {
+  unit: '次/s',
+  y1: {title: {display: true, text: '写入次数（次/s）'}},
 });
 
 function push(chart, ts, values) {
@@ -161,28 +286,132 @@ function push(chart, ts, values) {
   chart.update('none');
 }
 
+const errorKindLabels = {
+  database_rejected_connection: '数据库拒绝连接',
+  sql_request_failure: '请求执行失败',
+  runner_process_failure: '压测进程异常',
+  user_cancelled: '用户主动停止',
+};
+const qualityLabels = {
+  pending: '进行中', valid: '有效', partial: '部分有效',
+  not_usable: '不可用', unknown: '未知',
+};
+function text(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value == null || value === '' ? '-' : value;
+}
+
+function numberText(value, digits = 0) {
+  return value == null ? '-' : Number(value).toLocaleString('zh-CN', {
+    minimumFractionDigits: digits, maximumFractionDigits: digits,
+  });
+}
+
+function updateObservability(obs, run) {
+  if (!obs) return;
+  text('quality-label', qualityLabels[obs.quality] || obs.quality);
+  text('quality-reason', obs.quality_reason);
+  const errorText = obs.error_kind ? `（${errorKindLabels[obs.error_kind] || obs.error_kind}）` : '';
+  document.getElementById('error-kind').textContent = errorText;
+  const banner = document.getElementById('quality-banner');
+  banner.className = 'card advice ' + (obs.quality === 'valid' ? 'advice-info' :
+    (obs.quality === 'pending' ? 'advice-info' : (obs.quality === 'partial' ? 'advice-warn' : 'advice-error')));
+  text('obs-request-count', numberText(obs.request_count));
+  text('obs-request-failures', numberText(obs.request_failures));
+  text('obs-start-failures', numberText(obs.user_start_failures));
+  text('obs-exceptions', numberText(obs.exception_count));
+  const final = obs.final_metrics || {};
+  text('obs-final-qps', numberText(final.qps_avg, 1));
+  text('obs-final-p99', final.p99_ms == null ? '-' : `${numberText(final.p99_ms, 1)} ms`);
+  const capacity = obs.latest_capacity || {};
+  text('obs-threads-connected', numberText(capacity.threads_connected));
+  text('obs-max-connections', numberText(capacity.max_connections));
+  text('obs-active-users', numberText(capacity.active_users));
+  text('obs-connection-usage', capacity.connection_usage_pct == null ? '-' : `${numberText(capacity.connection_usage_pct, 1)}%`);
+  const top = obs.top_exception;
+  const details = top ? `最近异常：${top.message}（${numberText(top.count)} 次）` : '未发现 Locust 初始化异常';
+  text('obs-detail', details);
+  const state = document.getElementById('collector-state');
+  if (run && run.status !== 'running') {
+    state.textContent = '任务已结束';
+    state.className = 'badge badge-finished';
+  } else {
+    state.textContent = '正常';
+    state.className = 'badge badge-running';
+  }
+  if (run && run.process_exit_code != null) {
+    text('error-kind', `${document.getElementById('error-kind').textContent} 进程退出码：${run.process_exit_code}`);
+  }
+}
+
+function updatePointStatus(point) {
+  if (!point) return;
+  text('obs-request-count', numberText(point.request_count));
+  text('obs-request-failures', numberText(point.request_failures));
+  text('obs-start-failures', numberText(point.user_start_failures));
+  text('obs-exceptions', numberText(point.exception_count));
+  text('obs-threads-connected', numberText(point.threads_connected));
+  text('obs-max-connections', numberText(point.max_connections));
+  text('obs-active-users', numberText(point.active_users));
+  text('obs-connection-usage', point.connection_usage_pct == null ? '-' : `${numberText(point.connection_usage_pct, 1)}%`);
+  const state = document.getElementById('collector-state');
+  state.textContent = '正常';
+  state.className = 'badge badge-running';
+}
+
 function onPoint(p) {
+  updatePointStatus(p);
   push(charts.qps, p.ts, [p.qps, p.err_rate]);
-  push(charts.latency, p.ts, [p.avg_ms, p.p95_ms, p.p99_ms]);
+  push(charts.latencyAvg, p.ts, [p.avg_ms]);
+  push(charts.latencyPercentiles, p.ts, [p.p95_ms, p.p99_ms]);
   push(charts.conn, p.ts, [p.threads_running, p.threads_connected]);
-  push(charts.engine, p.ts, [p.mysql_qps, p.slow_inc, p.lock_waits_inc, p.tmp_disk_inc]);
+  push(charts.engineQps, p.ts, [p.mysql_qps]);
+  push(charts.engineSlow, p.ts, [p.slow_inc]);
+  push(charts.engineLock, p.ts, [p.lock_waits_inc]);
+  push(charts.engineTmp, p.ts, [p.tmp_disk_inc]);
+  push(charts.capacityCpu, p.ts, [p.cpu_pct]);
+  push(charts.capacityMemory, p.ts, [p.memory_pct]);
+  push(charts.capacityDisk, p.ts, [p.disk_used_pct]);
+  push(charts.capacityNetwork, p.ts, [p.net_recv_mb_s, p.net_sent_mb_s]);
+  push(charts.dbConnections, p.ts, [p.threads_connected, p.max_connections, p.active_users, p.connection_usage_pct]);
+  push(charts.dbLocks, p.ts, [p.lock_waits_inc, p.lock_wait_ms_inc]);
+  push(charts.dbDeadlocks, p.ts, [p.deadlocks_inc]);
+  push(charts.dbLog, p.ts, [p.innodb_log_waits_inc, p.innodb_log_writes_inc, p.innodb_log_write_requests_inc]);
 }
 
 const es = new EventSource('/api/runs/' + runId + '/stream');
 es.onmessage = (e) => { onPoint(JSON.parse(e.data)); };
+es.onerror = () => {
+  const state = document.getElementById('collector-state');
+  state.textContent = '连接断开，浏览器将自动重连';
+  state.className = 'badge badge-partial';
+};
 es.addEventListener('end', () => { es.close(); finishPoll(); });
 
 /* ---------- 分语句 P95/P99（读 locust full-history CSV） ---------- */
 const SQL_COLORS = ['#2563eb', '#d97706', '#059669', '#9333ea', '#dc2626', '#0891b2', '#7c3aed', '#0d9488'];
 let perSqlCache = null;
 let perSqlMetric = 'p99';
+let perSqlSelected = null;
 
 function renderPerSql() {
   if (!perSqlCache) return;
   const names = Object.keys(perSqlCache).sort();
+  const select = document.getElementById('persql-select');
+  if (!select) return;
+  if (perSqlSelected !== 'all' && !names.includes(perSqlSelected)) perSqlSelected = names[0] || null;
+  const options = ['<option value="all">全部 SQL</option>']
+    .concat(names.map(n => `<option value="${n}">${n}</option>`));
+  const optionHtml = options.join('');
+  if (select.dataset.options !== optionHtml) {
+    select.innerHTML = optionHtml;
+    select.dataset.options = optionHtml;
+  }
+  select.value = perSqlSelected || '';
   const tsList = [...new Set(names.flatMap(n => perSqlCache[n].map(p => p.ts)))].sort((a, b) => a - b);
   charts.persql.data.labels = tsList.map(ts => new Date(ts * 1000).toLocaleTimeString('zh-CN', {hour12: false}));
-  charts.persql.data.datasets = names.map((n, i) => {
+  const visibleNames = perSqlSelected === 'all' ? names : names.filter(n => n === perSqlSelected);
+  charts.persql.data.datasets = visibleNames.map((n, i) => {
     const m = new Map(perSqlCache[n].map(p => [p.ts, p[perSqlMetric + '_ms']]));
     return {
       label: n, borderColor: SQL_COLORS[i % SQL_COLORS.length],
@@ -190,6 +419,10 @@ function renderPerSql() {
       spanGaps: true, pointRadius: 0, borderWidth: 1.5, tension: 0.2,
     };
   });
+  const hint = document.getElementById('persql-hint');
+  if (hint) hint.textContent = perSqlSelected === 'all'
+    ? `当前显示全部 ${names.length} 条 SQL；曲线较多时可切换为单条 SQL。`
+    : `当前显示 ${perSqlSelected || '-'}；可切换“全部 SQL”进行横向比较。`;
   charts.persql.update('none');
 }
 
@@ -219,12 +452,52 @@ async function fetchPerSql() {
 fetchPerSql();
 let perSqlTimer = setInterval(fetchPerSql, 3000);
 
+const eventSeverityLabels = {critical: '严重', warning: '警告', info: '恢复'};
+function renderEvents(payload) {
+  const events = payload.events || [];
+  const thresholds = payload.thresholds || {};
+  text('event-count', `${events.length} 个事件`);
+  const thresholdEl = document.getElementById('event-thresholds');
+  thresholdEl.textContent = Object.values(thresholds).map(rule =>
+    `${rule.title} ≥ ${numberText(rule.threshold, 1)} ${rule.unit}`
+  ).join(' · ') || '暂无阈值';
+  const list = document.getElementById('event-timeline');
+  list.replaceChildren();
+  if (!events.length) {
+    const empty = document.createElement('li');
+    empty.className = 'muted';
+    empty.textContent = '未触发阈值告警';
+    list.appendChild(empty);
+    return;
+  }
+  events.slice().reverse().forEach(event => {
+    const item = document.createElement('li');
+    item.className = `event-${event.severity || 'info'}`;
+    const time = event.ts ? new Date(event.ts * 1000).toLocaleTimeString('zh-CN', {hour12: false}) : '-';
+    const value = event.value == null ? '-' : numberText(event.value, 1);
+    item.textContent = `${time} · ${eventSeverityLabels[event.severity] || event.severity} · ${event.title}：${value} ${event.unit || ''}（阈值 ${numberText(event.threshold, 1)} ${event.unit || ''}）`;
+    list.appendChild(item);
+  });
+}
+async function fetchEvents() {
+  try {
+    const resp = await fetch('/api/runs/' + runId + '/events');
+    if (resp.ok) renderEvents(await resp.json());
+  } catch (e) { /* 页面连接恢复后下一轮重试 */ }
+}
+fetchEvents();
+let eventTimer = setInterval(fetchEvents, 3000);
+
 document.querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('.seg-btn').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   perSqlMetric = b.dataset.metric;
   renderPerSql();
 }));
+document.getElementById('persql-select').addEventListener('change', (e) => {
+  perSqlSelected = e.target.value;
+  renderPerSql();
+});
 
 /* ---------- 计时 / 状态 ---------- */
 let timer = setInterval(updateElapsed, 1000);
@@ -236,9 +509,12 @@ updateElapsed();
 async function finishPoll() {
   clearInterval(timer);
   clearInterval(perSqlTimer);
+  clearInterval(eventTimer);
   await fetchPerSql(); // 结束后补最后一帧
   const resp = await fetch('/api/runs/' + runId);
+  if (!resp.ok) return;
   const run = await resp.json();
+  updateObservability(run.observability, run);
   const badge = document.getElementById('run-status');
   badge.textContent = run.status;
   badge.className = 'badge badge-' + run.status;
@@ -247,13 +523,16 @@ async function finishPoll() {
 }
 
 document.getElementById('btn-stop').addEventListener('click', async () => {
-  await fetch('/api/runs/' + runId + '/stop', {method: 'POST'});
+  const resp = await fetch('/api/runs/' + runId + '/stop', {method: 'POST'});
+  if (!resp.ok) text('collector-state', '停止失败');
 });
 
 // 轮询兜底：SSE 断开或直接进入已结束任务时刷新状态
-setInterval(async () => {
+async function refreshRun() {
   const resp = await fetch('/api/runs/' + runId);
+  if (!resp.ok) throw new Error('run status request failed');
   const run = await resp.json();
+  updateObservability(run.observability, run);
   if (run.status !== 'running') {
     const badge = document.getElementById('run-status');
     badge.textContent = run.status;
@@ -262,6 +541,16 @@ setInterval(async () => {
     document.getElementById('link-report').style.display = '';
     clearInterval(perSqlTimer);
   }
-}, 3000);
+}
+refreshRun().catch(() => {
+  const state = document.getElementById('collector-state');
+  state.textContent = '状态读取失败';
+  state.className = 'badge badge-failed';
+});
+setInterval(() => refreshRun().catch(() => {
+  const state = document.getElementById('collector-state');
+  state.textContent = '状态读取失败';
+  state.className = 'badge badge-failed';
+}), 3000);
 </script>
 {% endblock %}

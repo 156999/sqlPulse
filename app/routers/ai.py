@@ -11,7 +11,7 @@ from fastapi.responses import RedirectResponse
 from app import db
 from app.ai import diagnose_runner, key_store
 from app.auth import require_user
-from app.routers.pages import _report_context
+from app.routers.pages import _profile_context
 from app.services import connection_manager
 from app.templating import templates
 
@@ -23,26 +23,22 @@ def _user_id(user: Optional[dict]) -> str:
 
 
 @router.post("/api/ai/key")
-def save_ai_key(request: Request, api_key: str = Form(""), run_id: str = Form(""),
+def save_ai_key(request: Request, api_key: str = Form(""),
                 user: Optional[dict] = Depends(require_user)):
     key_store.warn_default_secret()
     api_key = api_key.strip()
-    run_id = run_id.strip()
-    if not db.get_run(run_id):
-        return RedirectResponse("/runs", status_code=303)
     error = key_store.validate(api_key)
     if error:
-        ctx = _report_context(request, run_id, ai_key_error=error)
-        return templates.TemplateResponse(request, "report.html", ctx, status_code=400)
+        ctx = _profile_context(request, error)
+        return templates.TemplateResponse(request, "profile.html", ctx, status_code=400)
     db.upsert_ai_key(_user_id(user), key_store.encrypt(api_key), key_store.mask(api_key))
-    return RedirectResponse(f"/runs/{run_id}/report#ai-diagnose", status_code=303)
+    return RedirectResponse("/profile#ai-key", status_code=303)
 
 
 @router.post("/api/ai/key/delete")
-def delete_ai_key(request: Request, run_id: str = Form(""), user: Optional[dict] = Depends(require_user)):
+def delete_ai_key(user: Optional[dict] = Depends(require_user)):
     db.delete_ai_key(_user_id(user))
-    target = f"/runs/{run_id}/report#ai-diagnose" if db.get_run(run_id) else "/runs"
-    return RedirectResponse(target, status_code=303)
+    return RedirectResponse("/profile#ai-key", status_code=303)
 
 
 @router.post("/api/runs/{run_id}/ai/diagnose")

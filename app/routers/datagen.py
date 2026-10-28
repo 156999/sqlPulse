@@ -11,11 +11,6 @@ from app.auth import get_current_user, require_user
 from app.config import settings
 from app.models import DataGenAnalyzeRequest, DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
-from app.services.credential_crypto import encrypt_dsn_snapshot
-from app.services.datagen import datagen_executor
-from app.services.datagen_rules import apply_database_rules, list_table_names, read_table_metadata, validate_field_rules
-from app.services.datagen_dependencies import build_dependency_plan
-from app.services.runner import now_iso
 from app.services.sql_executor import split_sql_statements
 from app.services.sql_grouping import describe_statements
 from app.services.script_runner import tail_file
@@ -74,13 +69,12 @@ def _datagen_page_context(request: Request, initial_mode: str = "") -> dict:
     return {
         "default_dsn": default_dsn,
         "connections": [connection_manager.to_public_connection(c) for c in db.list_connections(user_id)],
-        "jobs": db.list_datagen_jobs(),
+        "jobs": db.list_datagen_jobs_for_user(user_id),
         "script_enabled": settings.datagen_script_execution_enabled,
         "env_vars": _ENV_VARS,
         "max_sql_chars": settings.datagen_max_sql_chars,
         "max_script_chars": settings.datagen_max_script_chars,
         "initial_mode": initial_mode,
-        # 子栏目模式：隐藏标签栏，只呈现多表导入面板
         "standalone": initial_mode == "multi",
     }
 
@@ -108,6 +102,7 @@ def create_datagen_job(body: DataGenJobCreate, user: Optional[dict] = Depends(re
     try:
         return datagen_jobs.create_job(connection_manager.current_user_id(user), body)
     except HTTPException:
+        # 连接不存在等业务异常自带状态码，不能落到下面的 500 兜底
         raise
     except (ValueError, ConnectionError) as e:
         raise HTTPException(status_code=400, detail=str(e))

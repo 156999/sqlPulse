@@ -69,8 +69,22 @@ def _ai_card_state(request: Request, run_id: str) -> dict:
     }
 
 
-def _report_context(request: Request, run_id: str, ai_key_error: str = "") -> Optional[dict]:
-    """报告页模板上下文；任务不存在返回 None。key 表单校验失败时复用本函数重渲染。"""
+def _profile_context(request: Request, error: str = "") -> dict:
+    """用户信息页上下文：账号信息 + AI 密钥状态。"""
+    from app.ai import diagnose_runner
+
+    user = get_current_user(request)
+    user_id = connection_manager.current_user_id(user)
+    return {"user": user, "ai": diagnose_runner.key_state(user_id), "ai_key_error": error}
+
+
+@router.get("/profile")
+def profile_page(request: Request):
+    return templates.TemplateResponse(request, "profile.html", _profile_context(request))
+
+
+def _report_context(request: Request, run_id: str) -> Optional[dict]:
+    """报告页模板上下文；任务不存在返回 None。"""
     run = db.get_run(run_id)
     if not run:
         return None
@@ -80,7 +94,7 @@ def _report_context(request: Request, run_id: str, ai_key_error: str = "") -> Op
         report = generate_report(run_id)
     from app.services.l1 import build_view
     l1_view = build_view(report["l1"], report.get("l0") or {}) if report else None
-    ctx = {"run": run, "report": report, "l1_view": l1_view, "ai_key_error": ai_key_error}
+    ctx = {"run": run, "report": report, "l1_view": l1_view}
     ctx.update(_ai_card_state(request, run_id))
     return ctx
 

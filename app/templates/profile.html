@@ -13,35 +13,59 @@
 </div>
 
 <div class="card" id="ai-key">
-  <h3>AI 模型密钥</h3>
+  <h3>AI 模型</h3>
   <p>
-    {% if ai.source == 'user' %}
-      已配置：<code>{{ ai.masked }}</code>
-      <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }} · 费用由该密钥承担</span>
-    {% elif ai.source == 'server' %}
-      将使用服务器默认密钥 <code>{{ ai.masked }}</code>
-      <span class="muted">模型 {{ ai.model }} · 请求 {{ ai.base_url_host }}</span>
-    {% elif ai.source == 'broken' %}
-      <span class="err-msg">已保存的密钥无法解密（APP_SECRET_KEY 可能已更换），请重新填写。</span>
-    {% else %}
-      <span class="muted">未配置密钥：AI 诊断不会调用模型。</span>
-    {% endif %}
+    当前使用：<strong>{{ ai.provider_label }}</strong> · <code>{{ ai.model }}</code>
+    {% if ai.source == 'user' %}（密钥 <code>{{ ai.masked }}</code>）{% endif %}
+    {% if ai.source == 'server' %}（服务器默认密钥 <code>{{ ai.masked }}</code>）{% endif %}
+    {% if ai.source == 'broken' %}（<span class="err-msg">密钥无法解密</span>）{% endif %}
+    {% if ai.source == 'none' %}（<span class="muted">未配置密钥</span>）{% endif %}
+    <span class="muted">· 请求 {{ ai.base_url_host }} · 费用由对应厂商的 key 承担</span>
   </p>
   {% if ai_key_error %}<p class="err-msg">{{ ai_key_error }}</p>{% endif %}
   <form method="post" action="/api/ai/key" class="ai-key-form">
+    <select name="model" aria-label="厂商与模型">
+      {% for p in ai.providers %}
+      <optgroup label="{{ p.label }}">
+        {% for m in p.models %}
+        <option value="{{ p.key }}|{{ m }}" {% if p.key == ai.provider and m == ai.model %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </optgroup>
+      {% endfor %}
+    </select>
     <input type="password" name="api_key" autocomplete="new-password" maxlength="1024"
-           placeholder="sk-…（粘贴你的模型 API Key）">
-    <button class="primary">{{ '替换密钥' if ai.source in ('user', 'broken') else '保存密钥' }}</button>
+           placeholder="{{ 'sk-…（留空表示只改模型）' if ai.source in ('user', 'server') else 'sk-…（粘贴该厂商的 API Key）' }}">
+    <button class="primary">保存</button>
   </form>
-  {% if ai.source in ('user', 'broken') %}
-  <form method="post" action="/api/ai/key/delete" class="ai-key-form"
-        onsubmit="return confirm('确定删除已保存的模型密钥？删除后 AI 诊断不可用。');">
-    <button>删除密钥</button>
-  </form>
-  {% endif %}
+
+  <table class="table">
+    <thead><tr><th>厂商</th><th>密钥</th><th></th></tr></thead>
+    <tbody>
+      {% for p in ai.providers %}
+      <tr>
+        <td>{{ p.label }}</td>
+        <td>
+          {% if p.source == 'user' %}已配置 <code>{{ p.masked }}</code>
+          {% elif p.source == 'server' %}服务器默认 <code>{{ p.masked }}</code>
+          {% elif p.source == 'broken' %}<span class="err-msg">无法解密，请重新填写</span>
+          {% else %}<span class="muted">未配置</span>{% endif %}
+        </td>
+        <td>
+          {% if p.source in ('user', 'broken') %}
+          <form method="post" action="/api/ai/key/delete" class="ai-key-inline"
+                onsubmit="return confirm('确定删除 {{ p.label }} 的密钥？删除后使用该厂商的诊断不可用。');">
+            <input type="hidden" name="provider" value="{{ p.key }}">
+            <button>删除</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   <p class="hint">
     密钥经 Fernet 加密后存储，页面只显示掩码；更换 APP_SECRET_KEY 后需重新填写；
-    该密钥只用于当前用户的 AI 诊断，费用由该密钥承担。
+    每个厂商的密钥独立保存，费用由对应厂商的 key 承担。
   </p>
 </div>
 {% endblock %}

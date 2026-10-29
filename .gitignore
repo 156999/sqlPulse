@@ -18,3 +18,6 @@ _preview_*.html
 
 # 文档流水线（tencent-docx）的工作目录：草稿 / critic 报告 / 中间 HTML
 /output/
+
+# 本地实施记录（不上传）
+*.local.md

@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS metrics (
   run_id        TEXT NOT NULL,
   ts            INTEGER NOT NULL,
+  resource_collected_at REAL,
+  mysql_sample_interval_s REAL,
   qps           REAL,
   avg_ms        REAL,
   p95_ms        REAL,
@@ -87,6 +89,19 @@ CREATE TABLE IF NOT EXISTS reports (
   l1_json       TEXT NOT NULL,
   md_path       TEXT NOT NULL,
   created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sql_metrics (
+  run_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  collected_at REAL,
+  qps REAL,
+  avg_ms REAL,
+  p95_ms REAL,
+  p99_ms REAL,
+  err_rate REAL,
+  request_count INTEGER,
+  request_failures INTEGER,
+  PRIMARY KEY (run_id, ts)
 );
 CREATE TABLE IF NOT EXISTS datagen_jobs (
   id                TEXT PRIMARY KEY,
@@ -203,6 +218,7 @@ def _fetch_all(sql: str, args: tuple = ()) -> list:
 
 
 _METRIC_COLS = [
+    "resource_collected_at", "mysql_sample_interval_s",
     "qps", "avg_ms", "p95_ms", "p99_ms", "err_rate",
     "threads_running", "threads_connected", "max_connections", "active_users", "connection_usage_pct",
     "mysql_qps", "slow_inc", "lock_waits_inc", "lock_wait_ms_inc", "lock_current_waits",
@@ -215,6 +231,7 @@ _METRIC_COLS = [
 ]
 # 旧库升级：缺列则补
 _METRIC_ALTERS = {
+    "resource_collected_at": "REAL", "mysql_sample_interval_s": "REAL",
     "max_connections": "INTEGER", "active_users": "INTEGER", "connection_usage_pct": "REAL",
     "mysql_qps": "REAL", "slow_inc": "REAL", "lock_waits_inc": "REAL", "lock_wait_ms_inc": "REAL",
     "lock_current_waits": "INTEGER", "deadlocks_inc": "REAL", "innodb_log_waits_inc": "REAL",
@@ -230,8 +247,8 @@ _METRIC_ALTERS = {
     "top_exception_count": "INTEGER",
 }
 
-# These columns were used by the removed collection-quality view.  Older
-# SQLite databases may still contain them; keep them out of the API surface.
+# Drop legacy collection-quality/provenance fields before composing the source
+# timeline. Only the authoritative sql_metrics timestamp is exposed as source_ts.
 _REMOVED_METRIC_COLS = {
     "source_ts", "sample_age_ms", "stale", "collection_error", "sample_interval_s",
 }
@@ -582,12 +599,44 @@ def insert_metric(m: dict) -> None:
     cols = [c for c in _METRIC_COLS if c in m]
     with tx() as conn:
         conn.execute(
-            f"INSERT OR REPLACE INTO metrics (run_id,ts,{','.join(cols)}) VALUES (:run_id,:ts,{':' + ',:'.join(cols)})",
+            f"INSERT INTO metrics (run_id,ts,{','.join(cols)}) VALUES (:run_id,:ts,{':' + ',:'.join(cols)})"
+            f" ON CONFLICT(run_id,ts) DO UPDATE SET {','.join(f'{c}=excluded.{c}' for c in cols)}",
             {**{c: None for c in _METRIC_COLS}, **m},
         )
 
 
+def insert_sql_metrics(run_id: str, points: list, collected_at: Optional[float]) -> list:
+    from app.services.sql_history import SQL_FIELDS
+
+    if not points:
+        return []
+    changed = {}
+    with tx() as conn:
+        for point in points:
+            values = {"run_id": run_id, "collected_at": collected_at, **point}
+            cursor = conn.execute(
+                f"INSERT INTO sql_metrics (run_id,ts,collected_at,{','.join(SQL_FIELDS)})"
+                f" VALUES (:run_id,:ts,:collected_at,{','.join(':' + c for c in SQL_FIELDS)})"
+                " ON CONFLICT(run_id,ts) DO UPDATE SET "
+                + "collected_at=excluded.collected_at,"
+                + ",".join(f"{c}=excluded.{c}" for c in SQL_FIELDS)
+                + " WHERE " + " OR ".join(f"sql_metrics.{c} IS NOT excluded.{c}" for c in SQL_FIELDS),
+                values,
+            )
+            if cursor.rowcount:
+                stored = dict(conn.execute(
+                    "SELECT * FROM sql_metrics WHERE run_id=? AND ts=?", (run_id, point["ts"]),
+                ).fetchone())
+                changed[point["ts"]] = {**stored, "source_ts": point["ts"], "metric_scope": "sql"}
+    return [changed[ts] for ts in sorted(changed)]
+
+
 def get_metrics(run_id: str, ts_from: Optional[int] = None, ts_to: Optional[int] = None) -> list:
+    from app.services.sql_history import SQL_FIELDS, sync_sql_history
+
+    run = get_run(run_id)
+    if run and run["status"] not in ("pending", "running"):
+        sync_sql_history(run_id, historical=True)
     sql = "SELECT * FROM metrics WHERE run_id=?"
     args: list[Any] = [run_id]
     if ts_from is not None:
@@ -601,7 +650,24 @@ def get_metrics(run_id: str, ts_from: Optional[int] = None, ts_to: Optional[int]
     for point in points:
         for col in _REMOVED_METRIC_COLS:
             point.pop(col, None)
-    return points
+    # Once source history is available, discard the legacy SQL values stamped at
+    # polling time. Resource/exception measurements remain at their original time.
+    has_source = _fetch_one("SELECT 1 FROM sql_metrics WHERE run_id=? LIMIT 1", (run_id,))
+    if not has_source:
+        return points
+    for point in points:
+        point.update({col: None for col in SQL_FIELDS})
+        point["metric_scope"] = "resource"
+    sql_points = _fetch_all(sql.replace("FROM metrics", "FROM sql_metrics"), tuple(args))
+    combined = {point["ts"]: point for point in points}
+    for row in sql_points:
+        source = dict(row)
+        ts = source["ts"]
+        target = combined.setdefault(ts, {"run_id": run_id, "ts": ts, **dict.fromkeys(_METRIC_COLS)})
+        mixed = target.get("metric_scope") == "resource"
+        target.update(source)
+        target.update(source_ts=ts, metric_scope="mixed" if mixed else "sql")
+    return [combined[ts] for ts in sorted(combined)]
 
 
 def save_report(run_id: str, l0: dict, l1: list, md_path: str) -> None:

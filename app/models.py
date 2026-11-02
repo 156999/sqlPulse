@@ -126,7 +126,10 @@ class RunOut(BaseModel):
 
 
 class MetricPoint(BaseModel):
-    ts: int
+    ts: float
+    source_ts: Optional[int] = None
+    collected_at: Optional[float] = None
+    resource_collected_at: Optional[float] = None
     qps: Optional[float] = None
     avg_ms: Optional[float] = None
     p95_ms: Optional[float] = None

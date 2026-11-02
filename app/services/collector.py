@@ -1,6 +1,4 @@
 import asyncio
-import csv as csvmod
-import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -17,6 +15,7 @@ from app import db
 from app.config import settings
 from app.services.credential_crypto import decrypt_dsn_snapshot
 from app.services.observability import read_exception_summary
+from app.services.sql_history import HistoryReader, aggregate_point, read_per_sql_history, sync_sql_history
 
 # 需要差分为"每秒增量"的计数器（SHOW GLOBAL STATUS 键名）
 COUNTER_KEYS = [
@@ -38,70 +37,13 @@ COUNTER_FIELDS = {
 }
 
 
-def _num(row: dict, keys: list, default=None):
-    for k in keys:
-        v = row.get(k)
-        if v not in (None, "", "N/A"):
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                continue
-    return default
-
-
 def read_last_history(csv_path: Path) -> Optional[dict]:
-    """读 locust *_stats_history.csv 最后一行 Aggregated，列名做版本兼容。"""
-    try:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            rows = [r for r in csvmod.DictReader(f) if r.get("Name") == "Aggregated"]
-    except OSError:
-        return None
+    """Compatibility helper; live ingestion uses every new source row, not just this one."""
+    rows = [r for r in HistoryReader().read(csv_path) if r.get("Name") == "Aggregated"]
     if not rows:
         return None
-    r = rows[-1]
-    total = _num(r, ["Total Request Count", "Request Count"], 0) or 0
-    fail = _num(r, ["Total Failure Count", "Failure Count"], 0) or 0
-    return {
-        "qps": _num(r, ["Requests/s", "Current RPS"]),
-        "avg_ms": _num(r, ["Total Average Response Time", "Average Response Time"]),
-        "p95_ms": _num(r, ["95%"]),
-        "p99_ms": _num(r, ["99%"]),
-        "err_rate": (fail / total) if total else None,
-        "total_requests": total,
-        "total_failures": fail,
-    }
-
-
-_SQL_NAME_RE = re.compile(r"sql_\d+")
-
-
-def read_per_sql_history(csv_path: Path) -> dict:
-    """读 locust --csv-full-history 的 *_stats_history.csv，按语句返回时序。
-
-    返回 {sql_id: [{ts, rps, fails, avg_ms, p95_ms, p99_ms}, ...]}，
-    其中 p95/p99 为当前窗口分位（适合实时观察），avg 为累计均值。
-    """
-    out: dict = {}
-    try:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            for r in csvmod.DictReader(f):
-                name = r.get("Name", "")
-                if not _SQL_NAME_RE.fullmatch(name):
-                    continue  # 跳过 Aggregated / 其它条目
-                ts = _num(r, ["Timestamp"])
-                if ts is None:
-                    continue
-                out.setdefault(name, []).append({
-                    "ts": int(ts),
-                    "rps": _num(r, ["Requests/s", "Current RPS"]),
-                    "fails": _num(r, ["Failures/s"], 0),
-                    "avg_ms": _num(r, ["Total Average Response Time", "Average Response Time"]),
-                    "p95_ms": _num(r, ["95%"]),
-                    "p99_ms": _num(r, ["99%"]),
-                })
-    except OSError:
-        return {}
-    return out
+    point = aggregate_point(rows[-1])
+    return {**point, "total_requests": point["request_count"], "total_failures": point["request_failures"]}
 
 
 class Collector:
@@ -110,6 +52,7 @@ class Collector:
         self._mysql_conn = None
         self._mysql_dsn = None
         self._last_status: dict = {}  # run_id -> 上一次 SHOW GLOBAL STATUS 快照
+        self._last_status_time: dict = {}
         self._last_host_io: dict = {}  # run_id -> host IO/network counters
         if psutil:
             psutil.cpu_percent(interval=None)  # prime the non-blocking CPU sampler
@@ -125,8 +68,11 @@ class Collector:
             qs.remove(q)
         if not qs:
             self.subscribers.pop(run_id, None)
-            self._last_status.pop(run_id, None)
-            self._last_host_io.pop(run_id, None)
+
+    def release_run(self, run_id: str) -> None:
+        self._last_status.pop(run_id, None)
+        self._last_status_time.pop(run_id, None)
+        self._last_host_io.pop(run_id, None)
 
     def _broadcast(self, run_id: str, point: dict) -> None:
         for q in list(self.subscribers.get(run_id, [])):
@@ -180,22 +126,27 @@ class Collector:
             self._mysql_conn = None
             return None
 
-    def _mysql_metrics(self, run_id: str, status: dict) -> dict:
+    def _mysql_metrics(self, run_id: str, status: dict, sampled_at: Optional[float] = None) -> dict:
         """与该 run 上一次快照差分，得到每秒增量指标。"""
         out = {}
+        now = time.monotonic() if sampled_at is None else sampled_at
+        previous_time = self._last_status_time.get(run_id)
+        elapsed = now - previous_time if previous_time is not None else None
         prev = self._last_status.get(run_id)
-        if prev:
+        if prev and elapsed is not None and elapsed > 0:
+            out["mysql_sample_interval_s"] = elapsed
             for key in COUNTER_KEYS:
                 if key in status and key in prev:
                     out_key = COUNTER_FIELDS.get(key)
-                    if out_key:
-                        out[out_key] = max(0, status[key] - prev[key])
+                    if out_key and status[key] >= prev[key]:
+                        out[out_key] = (status[key] - prev[key]) / elapsed
         # buffer pool 命中率（累计口径，非差分）
         reads = status.get("Innodb_buffer_pool_reads")
         requests = status.get("Innodb_buffer_pool_read_requests")
         if reads is not None and requests is not None and requests > 0:
             out["bufpool_hit"] = (requests - reads) / requests
         self._last_status[run_id] = status
+        self._last_status_time[run_id] = now
         out["lock_current_waits"] = status.get("Innodb_row_lock_current_waits")
         out["innodb_log_pending_fsyncs"] = status.get("Innodb_os_log_pending_fsyncs")
         out["innodb_log_pending_writes"] = status.get("Innodb_os_log_pending_writes")
@@ -238,27 +189,20 @@ class Collector:
         import json as jsonmod
 
         run_id = run["id"]
-        hist = read_last_history(settings.data_dir / "locust" / f"{run_id}_stats_history.csv")
         dsn = decrypt_dsn_snapshot(jsonmod.loads(run["db_dsn_json"]))
         status = None
         try:
             status = self._query_status(dsn)
         except Exception as e:
             logger.debug("mysql status query failed: {}", e)
-        if hist is None and status is None:
-            return None
-
+        mysql_sampled_at = time.monotonic()
         host, _host_error = self._host_metrics(run_id)
-
+        collected_at = time.time()
         point = {
             "run_id": run_id,
-            "ts": int(time.time()),
-            "metric_scope": "window",
-            "qps": (hist or {}).get("qps"),
-            "avg_ms": (hist or {}).get("avg_ms"),
-            "p95_ms": (hist or {}).get("p95_ms"),
-            "p99_ms": (hist or {}).get("p99_ms"),
-            "err_rate": (hist or {}).get("err_rate"),
+            "ts": collected_at,
+            "resource_collected_at": collected_at,
+            "metric_scope": "resource",
         }
         exception_summary = read_exception_summary(run_id)
         top_exception = exception_summary["top_exception"] or {}
@@ -268,8 +212,6 @@ class Collector:
             "failure_events": exception_summary["failure_events"],
             "top_exception_message": top_exception.get("message"),
             "top_exception_count": top_exception.get("count"),
-            "request_count": (hist or {}).get("total_requests"),
-            "request_failures": (hist or {}).get("total_failures"),
         })
         if status:
             point["threads_running"] = status.get("Threads_running")
@@ -280,7 +222,7 @@ class Collector:
                 point["connection_usage_pct"] = (
                     status["Threads_connected"] / status["max_connections"] * 100
                 )
-            point.update(self._mysql_metrics(run_id, status))
+            point.update(self._mysql_metrics(run_id, status, mysql_sampled_at))
         point.update(host)
         return point
 
@@ -290,7 +232,14 @@ class Collector:
             t0 = time.perf_counter()
             try:
                 running = [r for r in db.list_runs() if r["status"] == "running"]
+                active_ids = {run["id"] for run in running}
+                for run_id in set(self._last_status) | set(self._last_host_io):
+                    if run_id not in active_ids:
+                        self.release_run(run_id)
                 for run in running:
+                    points = await asyncio.get_event_loop().run_in_executor(None, sync_sql_history, run["id"])
+                    for sql_point in points:
+                        self._broadcast(run["id"], sql_point)
                     point = await asyncio.get_event_loop().run_in_executor(None, self.sample, run)
                     if point:
                         db.insert_metric(point)

@@ -101,7 +101,7 @@ def build_l0(run: dict) -> dict:
     def col_sum(key):
         """返回 (合计, 是否有数据)。"真实为 0"（健康证据）与"没采到"
         （无法判断）必须区分 —— L1 的 B 层规则依赖这个区分。"""
-        vals = [m[key] for m in metrics if m.get(key) is not None]
+        vals = [m[key] * (m.get("mysql_sample_interval_s") or 1) for m in metrics if m.get(key) is not None]
         return (sum(vals), True) if vals else (None, False)
 
     def col_max(key):
@@ -109,8 +109,8 @@ def build_l0(run: dict) -> dict:
         return max(vals) if vals else None
 
     def col_avg(key):
-        vals = [m[key] for m in metrics if m.get(key) is not None]
-        return (sum(vals) / len(vals)) if vals else None
+        samples = [(m[key], m.get("mysql_sample_interval_s") or 1) for m in metrics if m.get(key) is not None]
+        return sum(v * elapsed for v, elapsed in samples) / sum(elapsed for _, elapsed in samples) if samples else None
 
     slow_total, slow_present = col_sum("slow_inc")
     lock_total, lock_present = col_sum("lock_waits_inc")
@@ -153,8 +153,8 @@ def build_l0(run: dict) -> dict:
         "lock_waits_rate_max": col_max("lock_waits_inc"),
         "mysql_qps_avg": col_avg("mysql_qps"),
         "threads_connected_max": col_max("threads_connected"),
-        "bufpool_hit_last": metrics[-1]["bufpool_hit"] if metrics else None,
-        "metrics_points": len(metrics),
+        "bufpool_hit_last": next((m["bufpool_hit"] for m in reversed(metrics) if m.get("bufpool_hit") is not None), None),
+        "metrics_points": sum(m.get("threads_running") is not None for m in metrics),
         "per_sql": per_sql,
     }
     if l0["total_requests"]:

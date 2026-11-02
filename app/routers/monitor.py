@@ -8,6 +8,7 @@ from app import db
 from app.config import settings
 from app.services.collector import collector, read_per_sql_history
 from app.services.observability import build_event_timeline, build_snapshot, capacity_thresholds
+from app.services.sql_history import METRIC_SCOPES
 
 router = APIRouter()
 
@@ -22,7 +23,9 @@ def get_metrics(run_id: str, ts_from: int = None, ts_to: int = None):
     observability["metrics_points"] = len(points)
     return {
         "points": points,
-        "window_scope": "current_window",
+        "window_scope": "mixed",
+        "metric_scopes": METRIC_SCOPES,
+        "time_basis": {"sql": "source_ts", "resource": "resource_collected_at", "sql_acquired": "collected_at"},
         "final_metrics": observability.get("final_metrics"),
         "observability": observability,
         "events": build_event_timeline(points),
@@ -65,6 +68,9 @@ async def stream(run_id: str):
             while True:
                 run = db.get_run(run_id)
                 if not run or run["status"] != "running":
+                    # Final source rows can be newer than the last collector tick.
+                    for p in db.get_metrics(run_id):
+                        yield f"data: {json.dumps(p, ensure_ascii=False)}\n\n"
                     yield "event: end\ndata: {}\n\n"
                     break
                 try:

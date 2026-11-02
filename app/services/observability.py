@@ -211,12 +211,11 @@ def build_snapshot(run: dict, metrics: Optional[list[dict]] = None) -> dict:
     final_metrics = read_final_metrics(run["id"])
     exceptions = read_exception_summary(run["id"])
     points = metrics or []
-    latest = points[-1] if points else {}
     snapshot = {
         **exceptions,
         "metrics_points": len(points),
         "latest_capacity": {
-            key: latest.get(key) for key in (
+            key: next((p[key] for p in reversed(points) if p.get(key) is not None), None) for key in (
                 "threads_connected", "max_connections", "active_users", "connection_usage_pct",
             )
         },

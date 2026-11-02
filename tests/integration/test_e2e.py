@@ -125,9 +125,25 @@ def test_good_sql_e2e(client):
     status = _wait_status(client, run_id)
     assert status == "finished"
     r = client.get(f"{BASE}/api/runs/{run_id}/metrics")
-    points = r.json()["points"]
-    assert 5 <= len(points) <= 15  # ≈10s 采样
-    assert any(p["qps"] and p["qps"] > 0 for p in points)
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    points = payload["points"]
+    # SQL snapshots and resource measurements have independent clocks. The API
+    # returns their union, so a 10-second run normally has about 20 total points.
+    sql_points = [p for p in points if p.get("source_ts") is not None]
+    resource_points = [p for p in points if p.get("resource_collected_at") is not None]
+    assert 5 <= len(sql_points) <= 15, sql_points
+    assert 5 <= len(resource_points) <= 15, resource_points
+    for series in (sql_points, resource_points):
+        timestamps = [p["ts"] for p in series]
+        assert timestamps == sorted(set(timestamps))
+    assert len(points) == len({p["ts"] for p in sql_points + resource_points})
+    assert all(p["ts"] == p["source_ts"] for p in sql_points)
+    assert all(p["ts"] == p["resource_collected_at"] for p in resource_points)
+    assert any(p["qps"] and p["qps"] > 0 for p in sql_points)
+    assert payload["window_scope"] == "mixed"
+    assert sql_points[-1]["request_count"] == payload["final_metrics"]["request_count"]
+    assert sql_points[-1]["request_failures"] == payload["final_metrics"]["request_failures"]
     r = _wait_report(client, run_id)
     assert r.status_code == 200 
     assert r.text.startswith("# 压测诊断报告 · it-good")

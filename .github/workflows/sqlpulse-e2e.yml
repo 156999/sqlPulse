@@ -50,8 +50,9 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Start sqlPulse and MySQL
-        run: docker compose up -d --build --wait --wait-timeout 300
+      - name: Start sqlPulse and MySQL fixture
+        # 产品 compose 不再带 MySQL；测试夹具由 docker-compose.mysql.yml 叠加进来
+        run: docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d --build --wait --wait-timeout 300
 
       - name: Run end-to-end tests
         run: |
@@ -62,7 +63,7 @@ jobs:
         if: always()
         run: |
           mkdir -p test-results
-          docker compose logs --no-color > test-results/compose.log
+          docker compose -f docker-compose.yml -f docker-compose.mysql.yml logs --no-color > test-results/compose.log
 
       - name: Upload results
         if: always()
@@ -73,4 +74,4 @@ jobs:
 
       - name: Stop test services
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: docker compose -f docker-compose.yml -f docker-compose.mysql.yml down --volumes --remove-orphans

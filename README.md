@@ -17,13 +17,25 @@ bash deploy.sh
 
 腾讯云服务器上还需要：
 
-1. 在云控制台安全组放行 `8080`（若改过 `WEB_PORT` 则放行对应端口）；示例库 MySQL 的宿主机端口 `3307` 不需要对公网放行
+1. 在云控制台安全组放行 `8080`（若改过 `WEB_PORT` 则放行对应端口）
 2. 打开 `http://<服务器公网IP>:8080`，首次启动用测试账号 `root / root` 登录
-3. 首次启动时 compose 自动建库 `sqlpulse_demo` 并执行 [scripts/seed_demo.sql](scripts/seed_demo.sql) 造数
-4. 对外部署前请改 `.env` 中的 `MYSQL_ROOT_PASSWORD`；有 HTTPS 反向代理时设 `AUTH_COOKIE_SECURE=true`，不需要开放注册时设 `AUTH_ALLOW_REGISTER=false`
+3. **目标 MySQL 自行准备**（本机、局域网、云数据库均可），登录后在「新建连接」里填 ip / port / 凭证。本仓库的 compose **不包含** MySQL，见下方「为什么 compose 里没有 MySQL」
+4. 对外部署前请确认 `.env` 的 `SQLPULSE_CREDENTIAL_KEY` 已设置（`AUTH_ENABLED=true` 时必填，缺失会启动失败）；有 HTTPS 反向代理时设 `AUTH_COOKIE_SECURE=true`，不需要开放注册时设 `AUTH_ALLOW_REGISTER=false`
 
-数据存储在 Docker 命名卷中：容器随服务器重启自动拉起，`docker compose down` 不会丢数据，只有 `docker compose down -v` 才会清空并重新初始化。
+数据存储在 Docker 命名卷中：容器随服务器重启自动拉起，`docker compose down` 不会丢数据，只有 `docker compose down -v` 才会清空。
 后续更新代码后，在项目目录重新执行 `bash deploy.sh` 即可重建并更新容器。
+
+### 为什么 compose 里没有 MySQL
+
+被测库由使用者在页面里填（ip + port + 凭证），可以是任意一台 MySQL —— 它属于**使用者的环境**，不属于本产品的部署单元。把 MySQL 绑进 compose 会让人误以为「必须用我们发的那个库」，也让部署多等 30–60 秒的建表灌数。所以产品 compose 只有 `web`。
+
+需要一份带演示数据的库时（本地试用、演示、跑集成测试），叠加一个附加文件即可：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d --build
+```
+
+它会额外起一个 `mysql:8.0`，宿主端口 **3307**（`MYSQL_HOST_PORT` 可调），自动建库 `sqlpulse_demo` 并执行 [scripts/seed_demo.sql](scripts/seed_demo.sql)。`.github/workflows/sqlpulse-e2e.yml` 用的就是这套。
 
 ### 方式二：本地 docker compose 启动
 
@@ -34,9 +46,9 @@ docker compose up -d --build
 ```
 
 - 打开 http://localhost:8080（宿主端口可在 `.env` 用 `WEB_PORT` 修改），首次启动可直接用测试账号 `root / root` 登录
-- 宿主机已占用 3306 的情况下不冲突：compose 的 MySQL 默认映射到宿主机 **3307**（web 容器走内部网络访问 mysql:3306 不受影响），亦可用 `MYSQL_HOST_PORT` 调整
+- 只起 SQL Pulse 本体。目标库在页面里填；想要开箱即用的演示库，把 `docker-compose.mysql.yml` 一起带上（见上）
 - 若启动报 `ports are not available: ... bind: An attempt was made to access a socket in a way forbidden by its access permissions`，说明该宿主端口被占用或**被 Windows 保留**（Hyper-V/WinNAT 会保留一段动态端口，与是否有进程占用无关）：改 `.env` 的 `WEB_PORT` 换一个端口即可
-- 结束后 `docker compose down`；加 `-v` 会连同命名卷一起清空并重新执行 seed 脚本
+- 结束后 `docker compose down`；加 `-v` 会连同命名卷一起清空。叠加了 `docker-compose.mysql.yml` 时，`-v` 还会重置演示库并重新执行 seed
 
 ### 方式三：本地 Python 运行（被测库自备或复用已起的 MySQL）
 

@@ -4,12 +4,12 @@
 
 ## 1. 两种方案
 
-- 方案一：使用 SQL Pulse 已有的 `docker-compose.yml` 内置 MySQL
+- 方案一：用仓库自带的 MySQL 夹具 `docker-compose.mysql.yml` 起一个（自带演示数据）
 - 方案二：单独启动一个 MySQL 容器，与 SQL Pulse 解耦
 
-如果只是给 SQL Pulse 用，选方案一；如果需要独立的公共 MySQL，选方案二。
+产品的 `docker-compose.yml` **只含 web，不含 MySQL** —— 被测库由使用者在页面里填（见 README「为什么 compose 里没有 MySQL」）。如果只是想让 SQL Pulse 有个能压的库，用方案一；如果需要独立的公共 MySQL，用方案二。
 
-## 2. 方案一：SQL Pulse 内置 MySQL
+## 2. 方案一：用仓库自带的 MySQL 夹具
 
 进入项目目录并设置宿主机映射端口：
 
@@ -20,20 +20,21 @@ cp .env.example .env
 # 外部连接端口设为 3306；如果服务器已有 3306，可以改成 3307
 sed -i 's/^MYSQL_HOST_PORT=.*/MYSQL_HOST_PORT=3306/' .env
 
-bash deploy.sh
+bash deploy.sh                    # 起 SQL Pulse 本体
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d   # 再补上 MySQL
 ```
 
 查看容器状态：
 
 ```bash
 cd /opt/sqlpulse
-docker compose ps
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml ps
 ```
 
 创建外部连接用户：
 
 ```bash
-docker compose exec mysql mysql -uroot -p
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml exec mysql mysql -uroot -p
 ```
 
 进入 MySQL 后执行：
@@ -55,7 +56,8 @@ FLUSH PRIVILEGES;
 
 - 容器内部始终是 `3306`
 - 宿主机外部端口由 `.env` 的 `MYSQL_HOST_PORT` 控制
-- MySQL 容器名通常为 `sqlpulse-mysql-1`，但推荐始终用 `docker compose exec mysql` 操作
+- MySQL 容器名通常为 `sqlpulse-mysql-1`，但推荐始终用
+  `docker compose -f docker-compose.yml -f docker-compose.mysql.yml exec mysql` 操作
 
 ## 3. 方案二：独立 MySQL 容器
 
@@ -150,9 +152,9 @@ Navicat / DBeaver 填写：
 
 ```bash
 cd /opt/sqlpulse
-docker compose ps
-docker compose logs -f mysql
-docker compose exec mysql mysql -uroot -p
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml ps
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml logs -f mysql
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml exec mysql mysql -uroot -p
 ```
 
 方案二：

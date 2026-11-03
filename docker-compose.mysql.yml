@@ -1,0 +1,41 @@
+# 附加文件：给 SQL Pulse 配一个「现成能压」的 MySQL（自带演示数据）。
+#
+# 产品的 docker-compose.yml 只含 web，不带任何被测数据库 —— 目标库由使用者在页面里填。
+# 想立刻有东西可压（本地试用 / 演示 / 跑集成测试）时，把它叠加进来：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d --build
+#
+# 自动化测试（.github/workflows/sqlpulse-e2e.yml）用的也是同一份，保证测试环境和演示环境一致。
+# 服务名必须叫 mysql：tests/integration 里的用例按服务名解析 DSN。
+services:
+  web:
+    # 叠加本文件时，把「新建连接」表单的初始值指向这个演示库，
+    # 这样打开页面点一下「测试连通性」就能通，不用自己猜地址。
+    environment:
+      - TARGET_DB_HOST=mysql
+      - TARGET_DB_PORT=3306
+      - TARGET_DB_USER=root
+      - TARGET_DB_PASSWORD=${MYSQL_ROOT_PASSWORD:-s3cret}
+      - TARGET_DB_NAME=sqlpulse_demo
+
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-s3cret}
+      MYSQL_DATABASE: sqlpulse_demo
+    # 宿主机端口默认 3307，避免与已有的 3306 冲突；容器内经服务名 mysql:3306 访问
+    ports:
+      - "${MYSQL_HOST_PORT:-3307}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts/seed_demo.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  mysql_data:

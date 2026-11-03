@@ -18,6 +18,7 @@ from app.services import explain_probe
 from app.services.credential_crypto import decrypt_dsn_snapshot
 from app.services.observability import finalize_run
 from app.services.sql_params import tokens, compile_tasks
+from app.services.sql_history import sync_sql_history
 
 WEIGHT_RE = re.compile(r"^\s*--\s*weight:\s*(\d+)", re.IGNORECASE)
 
@@ -138,6 +139,8 @@ def _tail(path: Path, size: int = 2048) -> str:
 class LocustRunner:
     def __init__(self):
         self._procs: dict = {}
+        self._cancel_requested: set = set()
+        self._state_lock = threading.RLock()
         self._on_finish = None  # callable(run_id)，在 watcher 线程触发
 
     def set_on_finish(self, cb) -> None:
@@ -189,13 +192,14 @@ class LocustRunner:
         threading.Thread(target=self._watch, args=(run_id,), daemon=True).start()
 
     def stop(self, run_id: str) -> str:
-        run = db.get_run(run_id)
-        if not run:
-            raise KeyError(run_id)
-        if run["status"] != "running":
-            raise PermissionError(f"run {run_id} 状态为 {run['status']}，无法停止")
-        proc = self._procs.get(run_id)
-        db.update_run(run_id, {"status": "cancelled", "ended_at": now_iso()})
+        with self._state_lock:
+            run = db.get_run(run_id)
+            if not run:
+                raise KeyError(run_id)
+            if run["status"] != "running":
+                raise PermissionError(f"run {run_id} 状态为 {run['status']}，无法停止")
+            proc = self._procs.get(run_id)
+            self._cancel_requested.add(run_id)
         if proc:
             try:
                 proc.terminate()
@@ -206,6 +210,11 @@ class LocustRunner:
                     proc.wait(2)
                 except Exception:
                     pass
+        else:
+            sync_sql_history(run_id)
+            with self._state_lock:
+                db.update_run(run_id, {"status": "cancelled", "ended_at": now_iso()})
+                self._cancel_requested.discard(run_id)
         return "cancelled"
 
     def _watch(self, run_id: str) -> None:
@@ -213,21 +222,32 @@ class LocustRunner:
         if not proc:
             return
         code = proc.wait()
-        self._procs.pop(run_id, None)
         run = db.get_run(run_id)
         if not run:
             return
-        if run["status"] == "running":
-            if code == 0:
-                all_fail = self._all_failed(run_id)
-                if all_fail:
-                    db.update_run(run_id, {"status": "failed", "error_msg": "所有请求均失败：请检查 SQL、权限或目标对象", "ended_at": now_iso()})
+        # proc.wait() guarantees CSV file handles are closed. Import every source
+        # row before exposing a terminal state to SSE clients or report generation.
+        try:
+            sync_sql_history(run_id)
+        except Exception as e:
+            logger.exception("final SQL history import failed for {}: {}", run_id, e)
+        with self._state_lock:
+            run = db.get_run(run_id)
+            if run_id in self._cancel_requested:
+                db.update_run(run_id, {"status": "cancelled", "ended_at": now_iso()})
+                self._cancel_requested.discard(run_id)
+            elif run["status"] == "running":
+                if code == 0:
+                    all_fail = self._all_failed(run_id)
+                    if all_fail:
+                        db.update_run(run_id, {"status": "failed", "error_msg": "所有请求均失败：请检查 SQL、权限或目标对象", "ended_at": now_iso()})
+                    else:
+                        db.update_run(run_id, {"status": "finished", "ended_at": now_iso()})
                 else:
-                    db.update_run(run_id, {"status": "finished", "ended_at": now_iso()})
-            else:
-                err = _tail(settings.logs_dir / f"locust_{run_id}.log")
-                db.update_run(run_id, {"status": "failed", "error_msg": err or f"locust 退出码 {code}", "ended_at": now_iso()})
-        db.update_run(run_id, {"process_exit_code": code})
+                    err = _tail(settings.logs_dir / f"locust_{run_id}.log")
+                    db.update_run(run_id, {"status": "failed", "error_msg": err or f"locust 退出码 {code}", "ended_at": now_iso()})
+            db.update_run(run_id, {"process_exit_code": code})
+            self._procs.pop(run_id, None)
         run = db.get_run(run_id)
         try:
             finalize_run(run, process_exit_code=code)

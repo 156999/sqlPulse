@@ -11,6 +11,8 @@ DSN = {
 import sys
 sys.path.insert(0, {{ project_root | tojson }})
 from app.services.sql_params import compile_tasks
+from app.services.locust_history_writer import configure_csv_history
+configure_csv_history()
 _DEFINITIONS, _TASKS = compile_tasks({{ tasks | tojson }}, {{ variables | tojson }})
 
 class SqlUser(User):

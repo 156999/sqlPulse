@@ -58,13 +58,14 @@
 </details>
 
 <h2 class="section-title">压测指标</h2>
+<p class="chart-hint">SQL 横轴使用 Locust 原始统计时间（秒级），不是网页收到数据的时间；QPS 为 Locust 近期已完成秒桶的平滑速率，P95/P99 为近约 10 秒窗口，平均延迟和错误率为累计口径。SQL 统计按请求完成记录，不能还原单次 SQL 的开始时间。超过 2.5 秒的数据间隔以断线展示。</p>
 <div class="chart-stack">
   <div class="card chart-card">
-    <div class="chart-head"><h3>压测 QPS 与请求错误率（当前窗口）</h3></div>
+    <div class="chart-head"><h3>压测 QPS（近期平滑）与请求错误率（累计）</h3></div>
     <div class="chart-body"><canvas id="chart-qps"></canvas></div>
   </div>
   <div class="card chart-card">
-    <div class="chart-head"><h3>平均响应延迟（当前窗口）</h3></div>
+    <div class="chart-head"><h3>平均响应延迟（累计）</h3></div>
     <div class="chart-body"><canvas id="chart-latency-avg"></canvas></div>
   </div>
   <div class="card chart-card">
@@ -91,6 +92,7 @@
 </div>
 
 <h2 class="section-title">MySQL 引擎指标</h2>
+<p class="chart-hint">MySQL 和主机指标按实际采样时间展示；计数器速率按两次有效采样的实际间隔换算。资源数据不会随 SQL 历史回填而移动。</p>
 <div class="chart-grid engine-chart-grid">
   <div class="card chart-card">
     <div class="chart-head"><h3>连接数</h3></div>
@@ -136,29 +138,54 @@
   <ol id="event-timeline" class="event-timeline"><li class="muted">等待采集数据…</li></ol>
 </div>
 
+<script src="/static/monitor_timeline.js"></script>
 <script>
 const runId = '{{ run.id }}';
 const runStartedAt = '{{ run.started_at or "" }}';
 const startedAt = runStartedAt ? new Date(runStartedAt).getTime() : Date.now();
 const maxPoints = 600;
 const charts = {};
+const {upsert, formatTime} = SqlPulseTimeline;
+const pendingCharts = new Set();
+let drawScheduled = false;
+function redraw(chart) {
+  pendingCharts.add(chart);
+  if (drawScheduled) return;
+  drawScheduled = true;
+  requestAnimationFrame(() => {
+    pendingCharts.forEach(item => item.update('none'));
+    pendingCharts.clear();
+    drawScheduled = false;
+  });
+}
 
 function mkChart(id, datasets, opts) {
   const ctx = document.getElementById(id).getContext('2d');
+  const options = Object.assign({
+    animation: false, responsive: true, maintainAspectRatio: false,
+    scales: {y: {beginAtZero: true, title: {display: true}}},
+    plugins: {legend: {labels: {boxWidth: 12}}}
+  }, opts || {});
+  options.scales.x = {
+    type: 'linear',
+    ticks: {maxTicksLimit: 10, callback: formatTime},
+    title: {display: true, text: '时间'},
+  };
+  options.plugins.tooltip = options.plugins.tooltip || {};
+  options.plugins.tooltip.callbacks = {
+    ...(options.plugins.tooltip.callbacks || {}),
+    title: items => items.length ? formatTime(items[0].parsed.x) : '',
+  };
   return new Chart(ctx, {
     type: 'line',
-    data: {labels: [], datasets: datasets.map(d => ({pointRadius: 0, borderWidth: 1.5, tension: 0.2, ...d, data: []}))},
-    options: Object.assign({
-      animation: false, responsive: true, maintainAspectRatio: false,
-      scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true}}},
-      plugins: {legend: {labels: {boxWidth: 12}}}
-    }, opts || {})
+    data: {datasets: datasets.map(d => ({pointRadius: 0, borderWidth: 1.5, tension: 0, spanGaps: 2.5, ...d, data: []}))},
+    options,
   });
 }
 
 charts.qps = mkChart('chart-qps', [
-  {label: '当前窗口 QPS（次/秒）', borderColor: '#2563eb', yAxisID: 'y'},
-  {label: '请求错误率（%）', borderColor: '#dc2626', yAxisID: 'y1', borderDash: [4, 3]}
+  {label: '近期平滑 QPS（次/秒）', borderColor: '#2563eb', yAxisID: 'y'},
+  {label: '累计请求错误率（%）', borderColor: '#dc2626', yAxisID: 'y1', borderDash: [4, 3]}
 ], {
   scales: {
     x: {ticks: {maxTicksLimit: 10}},
@@ -168,14 +195,14 @@ charts.qps = mkChart('chart-qps', [
          title: {display: true, text: '错误率（%）'}, ticks: {callback: v => (v * 100).toFixed(0) + '%'}}
   },
   plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
-    label: ctx => ctx.dataset.label === '请求错误率（%）'
+    label: ctx => ctx.dataset.yAxisID === 'y1'
       ? ` 错误率：${(ctx.parsed.y * 100).toFixed(2)}%`
       : ` QPS：${ctx.parsed.y.toFixed(1)} 次/秒`
   }}}
 });
 
 charts.latencyAvg = mkChart('chart-latency-avg', [
-  {label: '平均延迟', borderColor: '#0891b2'}
+  {label: '累计平均延迟', borderColor: '#0891b2'}
 ], {
   scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: '平均延迟（ms）'}}},
   plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
@@ -276,14 +303,8 @@ charts.dbLog = mkCapacityChart('chart-db-log', [
 });
 
 function push(chart, ts, values) {
-  const label = new Date(ts * 1000).toLocaleTimeString('zh-CN', {hour12: false});
-  chart.data.labels.push(label);
-  chart.data.datasets.forEach((d, i) => d.data.push(values[i]));
-  if (chart.data.labels.length > maxPoints) {
-    chart.data.labels.shift();
-    chart.data.datasets.forEach(d => d.data.shift());
-  }
-  chart.update('none');
+  chart.data.datasets.forEach((d, i) => upsert(d.data, ts, values[i], maxPoints));
+  redraw(chart);
 }
 
 const errorKindLabels = {
@@ -344,16 +365,24 @@ function updateObservability(obs, run) {
   }
 }
 
+let latestSqlTs = -Infinity;
+let latestResourceTs = -Infinity;
 function updatePointStatus(point) {
   if (!point) return;
-  text('obs-request-count', numberText(point.request_count));
-  text('obs-request-failures', numberText(point.request_failures));
-  text('obs-start-failures', numberText(point.user_start_failures));
-  text('obs-exceptions', numberText(point.exception_count));
-  text('obs-threads-connected', numberText(point.threads_connected));
-  text('obs-max-connections', numberText(point.max_connections));
-  text('obs-active-users', numberText(point.active_users));
-  text('obs-connection-usage', point.connection_usage_pct == null ? '-' : `${numberText(point.connection_usage_pct, 1)}%`);
+  if (point.request_count != null && point.ts >= latestSqlTs) {
+    latestSqlTs = point.ts;
+    text('obs-request-count', numberText(point.request_count));
+    text('obs-request-failures', numberText(point.request_failures));
+  }
+  if (point.metric_scope !== 'sql' && point.ts >= latestResourceTs) {
+    latestResourceTs = point.ts;
+    text('obs-start-failures', numberText(point.user_start_failures));
+    text('obs-exceptions', numberText(point.exception_count));
+    text('obs-threads-connected', numberText(point.threads_connected));
+    text('obs-max-connections', numberText(point.max_connections));
+    text('obs-active-users', numberText(point.active_users));
+    text('obs-connection-usage', point.connection_usage_pct == null ? '-' : `${numberText(point.connection_usage_pct, 1)}%`);
+  }
   const state = document.getElementById('collector-state');
   state.textContent = '正常';
   state.className = 'badge badge-running';
@@ -361,9 +390,13 @@ function updatePointStatus(point) {
 
 function onPoint(p) {
   updatePointStatus(p);
-  push(charts.qps, p.ts, [p.qps, p.err_rate]);
-  push(charts.latencyAvg, p.ts, [p.avg_ms]);
-  push(charts.latencyPercentiles, p.ts, [p.p95_ms, p.p99_ms]);
+  if (p.source_ts != null || p.qps != null) {
+    const ts = p.source_ts ?? p.ts;
+    push(charts.qps, ts, [p.qps, p.err_rate]);
+    push(charts.latencyAvg, ts, [p.avg_ms]);
+    push(charts.latencyPercentiles, ts, [p.p95_ms, p.p99_ms]);
+  }
+  if (p.metric_scope === 'sql') return;
   push(charts.conn, p.ts, [p.threads_running, p.threads_connected]);
   push(charts.engineQps, p.ts, [p.mysql_qps]);
   push(charts.engineSlow, p.ts, [p.slow_inc]);
@@ -386,7 +419,7 @@ es.onerror = () => {
   state.textContent = '连接断开，浏览器将自动重连';
   state.className = 'badge badge-partial';
 };
-es.addEventListener('end', () => { es.close(); finishPoll(); });
+es.addEventListener('end', () => { es.close(); finishPoll().catch(() => text('collector-state', '结束数据读取失败，正在重试')); });
 
 /* ---------- 分语句 P95/P99（读 locust full-history CSV） ---------- */
 const SQL_COLORS = ['#2563eb', '#d97706', '#059669', '#9333ea', '#dc2626', '#0891b2', '#7c3aed', '#0d9488'];
@@ -408,15 +441,14 @@ function renderPerSql() {
     select.dataset.options = optionHtml;
   }
   select.value = perSqlSelected || '';
-  const tsList = [...new Set(names.flatMap(n => perSqlCache[n].map(p => p.ts)))].sort((a, b) => a - b);
-  charts.persql.data.labels = tsList.map(ts => new Date(ts * 1000).toLocaleTimeString('zh-CN', {hour12: false}));
   const visibleNames = perSqlSelected === 'all' ? names : names.filter(n => n === perSqlSelected);
   charts.persql.data.datasets = visibleNames.map((n, i) => {
-    const m = new Map(perSqlCache[n].map(p => [p.ts, p[perSqlMetric + '_ms']]));
+    const data = [];
+    perSqlCache[n].forEach(p => upsert(data, p.ts, p[perSqlMetric + '_ms'], maxPoints));
     return {
       label: n, borderColor: SQL_COLORS[i % SQL_COLORS.length],
-      data: tsList.map(ts => m.has(ts) ? m.get(ts) : null),
-      spanGaps: true, pointRadius: 0, borderWidth: 1.5, tension: 0.2,
+      data,
+      spanGaps: 2.5, pointRadius: 0, borderWidth: 1.5, tension: 0,
     };
   });
   const hint = document.getElementById('persql-hint');
@@ -444,10 +476,12 @@ function updateTaskTable() {
 async function fetchPerSql() {
   try {
     const resp = await fetch('/api/runs/' + runId + '/per-sql-metrics');
+    if (!resp.ok) return false;
     perSqlCache = await resp.json();
     renderPerSql();
     updateTaskTable();
-  } catch (e) { /* 运行结束前的短暂窗口，忽略 */ }
+    return true;
+  } catch (e) { return false; }
 }
 fetchPerSql();
 let perSqlTimer = setInterval(fetchPerSql, 3000);
@@ -482,8 +516,10 @@ function renderEvents(payload) {
 async function fetchEvents() {
   try {
     const resp = await fetch('/api/runs/' + runId + '/events');
-    if (resp.ok) renderEvents(await resp.json());
-  } catch (e) { /* 页面连接恢复后下一轮重试 */ }
+    if (!resp.ok) return false;
+    renderEvents(await resp.json());
+    return true;
+  } catch (e) { return false; }
 }
 fetchEvents();
 let eventTimer = setInterval(fetchEvents, 3000);
@@ -501,25 +537,48 @@ document.getElementById('persql-select').addEventListener('change', (e) => {
 
 /* ---------- 计时 / 状态 ---------- */
 let timer = setInterval(updateElapsed, 1000);
+let endedAt = {{ (run.ended_at or '') | tojson }};
 function updateElapsed() {
-  document.getElementById('elapsed').textContent = Math.round((Date.now() - startedAt) / 1000) + 's';
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  document.getElementById('elapsed').textContent = Math.max(0, Math.round((end - startedAt) / 1000)) + 's';
 }
 updateElapsed();
 
+let finishing = false;
+let finished = false;
 async function finishPoll() {
+  if (finishing || finished) return;
+  finishing = true;
+  try {
+  // Replace the chart snapshot, then accept any later replay as timestamp upserts.
+  const metricsResp = await fetch('/api/runs/' + runId + '/metrics');
+  if (!metricsResp.ok) throw new Error('final metrics request failed');
+  const metrics = await metricsResp.json();
+  Object.values(charts).forEach(chart => chart.data.datasets.forEach(d => { d.data = []; }));
+  latestSqlTs = latestResourceTs = -Infinity;
+  metrics.points.forEach(onPoint);
+  const resp = await fetch('/api/runs/' + runId);
+  if (!resp.ok) throw new Error('final run request failed');
+  const run = await resp.json();
+  if (run.status === 'running') return;
+  const refreshed = await Promise.all([fetchPerSql(), fetchEvents()]);
+  if (refreshed.some(ok => !ok)) throw new Error('final series refresh failed');
+  endedAt = run.ended_at;
+  updateElapsed();
   clearInterval(timer);
   clearInterval(perSqlTimer);
   clearInterval(eventTimer);
-  await fetchPerSql(); // 结束后补最后一帧
-  const resp = await fetch('/api/runs/' + runId);
-  if (!resp.ok) return;
-  const run = await resp.json();
   updateObservability(run.observability, run);
   const badge = document.getElementById('run-status');
   badge.textContent = run.status;
   badge.className = 'badge badge-' + run.status;
   document.getElementById('btn-stop').style.display = 'none';
   document.getElementById('link-report').style.display = '';
+  finished = true;
+  es.close();
+  } finally {
+    finishing = false;
+  }
 }
 
 document.getElementById('btn-stop').addEventListener('click', async () => {
@@ -534,12 +593,11 @@ async function refreshRun() {
   const run = await resp.json();
   updateObservability(run.observability, run);
   if (run.status !== 'running') {
-    const badge = document.getElementById('run-status');
-    badge.textContent = run.status;
-    badge.className = 'badge badge-' + run.status;
-    document.getElementById('btn-stop').style.display = 'none';
-    document.getElementById('link-report').style.display = '';
-    clearInterval(perSqlTimer);
+    await finishPoll();
+  } else {
+    // Also repairs SQL frames missed during a dropped SSE connection.
+    const resp = await fetch('/api/runs/' + runId + '/metrics');
+    if (resp.ok) (await resp.json()).points.forEach(onPoint);
   }
 }
 refreshRun().catch(() => {

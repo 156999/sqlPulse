@@ -1,3 +1,7 @@
+# 产品部署文件：只含 SQL Pulse 本体，不带任何被测数据库。
+# 目标 MySQL 由使用者在「新建连接」页面填写（ip + port + 凭证），
+# 可以是本机、局域网或云上的任意实例 —— 部署时不需要、也不应该由我们代劳。
+# 自动化测试与演示用的 MySQL 夹具单独放在 docker-compose.mysql.yml，不参与产品部署。
 services:
   web:
     build:
@@ -8,11 +12,13 @@ services:
     ports:
       - "${WEB_PORT:-8080}:8080"
     environment:
-      - TARGET_DB_HOST=mysql
-      - TARGET_DB_PORT=3306
-      - TARGET_DB_USER=root
-      - TARGET_DB_PASSWORD=${MYSQL_ROOT_PASSWORD:-s3cret}
-      - TARGET_DB_NAME=sqlpulse_demo
+      # 以下 5 项只是「新建连接」表单的初始值，应用启动时不会去连任何库。
+      # 默认留空，让使用者填自己那台 MySQL；容器内写 localhost 指的是容器本身，天然是错的。
+      - TARGET_DB_HOST=${TARGET_DB_HOST:-}
+      - TARGET_DB_PORT=${TARGET_DB_PORT:-3306}
+      - TARGET_DB_USER=${TARGET_DB_USER:-}
+      - TARGET_DB_PASSWORD=${TARGET_DB_PASSWORD:-}
+      - TARGET_DB_NAME=${TARGET_DB_NAME:-}
       - DATAGEN_SCRIPT_EXECUTION_ENABLED=${DATAGEN_SCRIPT_EXECUTION_ENABLED:-false}
       - DATAGEN_SQL_TIMEOUT_SEC=${DATAGEN_SQL_TIMEOUT_SEC:-300}
       - DATAGEN_SCRIPT_TIMEOUT_SEC=${DATAGEN_SCRIPT_TIMEOUT_SEC:-3600}
@@ -36,31 +42,8 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
-    depends_on:
-      mysql:
-        condition: service_healthy
-
-  mysql:
-    image: mysql:8.0
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-s3cret}
-      MYSQL_DATABASE: sqlpulse_demo
-    # 宿主机端口默认 3307，避免与已有 MySQL 的 3306 冲突；web 容器经内部网络访问 mysql:3306 不受影响
-    ports:
-      - "${MYSQL_HOST_PORT:-3307}:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./scripts/seed_demo.sql:/docker-entrypoint-initdb.d/seed.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
 
 volumes:
   sqlpulse_data:
   sqlpulse_logs:
   sqlpulse_reports:
-  mysql_data:

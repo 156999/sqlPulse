@@ -11,20 +11,22 @@ SQL 压测 + 造数 + 实时可视化 + L0/L1 规则报告 + L2 AI 诊断的一�
 
 ```bash
 cp .env.example .env
+
+# 可选：想自己掌控密钥，先生成并填入 .env；留空则由 deploy.sh 自动生成
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"                             # APP_SECRET_KEY
 python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"  # SQLPULSE_CREDENTIAL_KEY
-# 把两个输出分别填入 .env 后执行：
+
 bash deploy.sh
 ```
 
-脚本会自动安装 Docker 与 Compose 插件（若缺失）、复用 `.env` 中已填写的密钥、构建并后台启动全部容器，最后等待健康检查通过。
+脚本会自动安装 Docker 与 Compose 插件（若缺失）、补齐 `.env` 中留空的密钥（`APP_SECRET_KEY` / `SQLPULSE_CREDENTIAL_KEY`，已填写则不覆盖）、构建并后台启动 `web` 容器，最后等待健康检查通过。
 
 腾讯云服务器上还需要：
 
 1. 在云控制台安全组放行 `8080`（若改过 `WEB_PORT` 则放行对应端口）
 2. 打开 `http://<服务器公网IP>:8080`，首次启动用测试账号 `root / root` 登录
 3. **目标 MySQL 自行准备**（本机、局域网、云数据库均可），登录后在「新建连接」里填 ip / port / 凭证。本仓库的 compose **不包含** MySQL，见下方「为什么 compose 里没有 MySQL」
-4. 有 HTTPS 反向代理时设 `AUTH_COOKIE_SECURE=true`，不需要开放注册时设 `AUTH_ALLOW_REGISTER=false`
+4. `SQLPULSE_CREDENTIAL_KEY` 是必填项（`AUTH_ENABLED=true` 时缺失会启动失败），`deploy.sh` 已自动处理。**请把 `.env` 备份到安全位置**：这个密钥一旦变更，库里已保存的数据库密码将永久无法解密。有 HTTPS 反向代理时设 `AUTH_COOKIE_SECURE=true`，不需要开放注册时设 `AUTH_ALLOW_REGISTER=false`
 
 数据存储在 Docker 命名卷中：容器随服务器重启自动拉起，`docker compose down` 不会丢数据，只有 `docker compose down -v` 才会清空。
 后续更新代码后，在项目目录重新执行 `bash deploy.sh` 即可重建并更新容器。

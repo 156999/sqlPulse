@@ -528,14 +528,26 @@ def get_run_metrics(run_id: str) -> dict:
         l0, l1, report_time = {}, None, None
         if row:
             try:
+                from app.services.l1.contract import normalize_l1
+
                 parsed_l0, parsed_l1 = json.loads(row["l0_json"]), json.loads(row["l1_json"])
-                if not isinstance(parsed_l0, dict) or not isinstance(parsed_l1, list):
+                # l1_json 有两种形状：旧版 list[dict] 与新版带 verdict 的 dict
+                # （2026-09-30 起）。统一用 normalize_l1 归一化后再取 findings，
+                # 避免新报告被判为损坏。
+                if not isinstance(parsed_l0, dict):
                     raise ValueError("报告结构不正确")
-                if any(not isinstance(item, dict) for item in parsed_l1):
+                if isinstance(parsed_l1, list):
+                    if any(not isinstance(item, dict) for item in parsed_l1):
+                        raise ValueError("L1 应为对象列表")
+                elif not (isinstance(parsed_l1, dict) and "verdict" in parsed_l1):
+                    raise ValueError("L1 结构不正确")
+                findings = normalize_l1(parsed_l1).get("findings")
+                if not isinstance(findings, list) or any(
+                        not isinstance(item, dict) for item in findings):
                     raise ValueError("L1 应为对象列表")
-                l0, l1, report_time = parsed_l0, parsed_l1, row["created_at"]
-            except (ValueError, TypeError):
-                warnings.append("已保存报告损坏，忽略报告，仍尝试读取 stats.csv")
+                l0, l1, report_time = parsed_l0, findings, row["created_at"]
+            except (ValueError, TypeError, AttributeError):
+                warnings.append("已保存报告损坏或结构不兼容，忽略报告，仍尝试读取 stats.csv")
         aggregate, per_rows = read_stats(run_id)
         summary = _stats_fields(aggregate or {})
         sources = {key: "locust_stats_csv" if value is not None else None

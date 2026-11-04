@@ -5,7 +5,11 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d --build
 #
-# 自动化测试（.github/workflows/sqlpulse-e2e.yml）用的也是同一份，保证测试环境和演示环境一致。
+# 定位：这是「测试 / 演示夹具」，不是产品编排的一部分。产品部署不需要它，
+# 不叠加时它对运行没有任何影响（不写 -f，这个文件连解析都不会发生）。
+#
+# 自动化测试（.github/workflows/sqlpulse-e2e.yml）用的也是同一份，保证测试环境与演示环境一致 ——
+# 所以删除本文件必须同步改 CI，否则 e2e 会因连不上 mysql 直接失败。
 # 服务名必须叫 mysql：tests/integration 里的用例按服务名解析 DSN。
 services:
   web:

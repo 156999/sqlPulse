@@ -66,6 +66,19 @@ if grep -Eq '^APP_SECRET_KEY=[[:space:]]*$' .env; then
   sed -i "s|^APP_SECRET_KEY=.*|APP_SECRET_KEY=${KEY}|" .env
   echo "    已自动生成 APP_SECRET_KEY"
 fi
+
+# SQLPULSE_CREDENTIAL_KEY 与 APP_SECRET_KEY 同为必填项：AUTH_ENABLED=true 时
+# app/config.py 的校验会在两项任一为空时直接抛错。它用来加密连接密码（Fernet，
+# 32 字节 urlsafe base64）。⚠️ 该密钥一旦生成就不能再改：库里已加密的密码会永久解不开。
+if grep -Eq '^SQLPULSE_CREDENTIAL_KEY=[[:space:]]*$' .env; then
+  if has_cmd python3; then
+    CKEY="$(python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')"
+  else
+    CKEY="$(openssl rand -base64 32 | tr '+/' '-_')"
+  fi
+  sed -i "s|^SQLPULSE_CREDENTIAL_KEY=.*|SQLPULSE_CREDENTIAL_KEY=${CKEY}|" .env
+  echo "    已自动生成 SQLPULSE_CREDENTIAL_KEY（请备份，丢失后已存密码无法解密）"
+fi
 sed -i 's/\r$//' .env
 
 if docker compose version >/dev/null 2>&1; then

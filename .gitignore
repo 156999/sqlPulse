@@ -1,4 +1,7 @@
 .env
+# 本地覆盖文件：compose 会自动加载它，一旦入库会连带影响 CI 与队友环境
+docker-compose.override.yml
+docker-compose.override.yaml
 data/
 logs/
 reports/

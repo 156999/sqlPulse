@@ -9,6 +9,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 BASE = "http://127.0.0.1:8080"
+
+# 这三个变量由 CI（.github/workflows/sqlpulse-e2e.yml）注入；本地裸跑 pytest 时通常没有。
+# 缺了就整文件跳过，而不是在模块导入阶段抛 KeyError —— 否则看起来像"测试全坏了"，
+# 实际只是没配参数。
+_REQUIRED_ENV = ("TEST_DB_HOST", "TEST_DB_PORT", "TEST_DB_PASSWORD")
+_MISSING_ENV = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+if _MISSING_ENV:
+    pytest.skip(
+        f"缺少环境变量 {', '.join(_MISSING_ENV)}：本文件需要一套可用的 MySQL 与运行中的应用。\n"
+        "  本地运行：先起示例库 docker compose -f docker-compose.yml "
+        "-f docker-compose.mysql.yml up -d，再导出 TEST_DB_*（见 LINUX_DEPLOY.md 第 8 节）；\n"
+        "  或者交给 CI 跑（推 PR 到 main 会自动触发）。",
+        allow_module_level=True,
+    )
+
 DSN = {
     "host": os.environ["TEST_DB_HOST"],
     "port": int(os.environ["TEST_DB_PORT"]),

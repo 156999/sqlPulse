@@ -21,5 +21,9 @@ compose-down:
 deploy:
 	bash deploy.sh
 
+# 重灌示例库。脚本自带 CREATE DATABASE / DROP TABLE IF EXISTS，可重复执行。
+# 前置：示例库必须先起起来（compose-up 只含 web，需叠加夹具文件）：
+#   docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d
 seed:
-	mysql -h 127.0.0.1 -P 3306 -u root -p < scripts/seed_demo.sql
+	docker compose -f docker-compose.yml -f docker-compose.mysql.yml exec -T mysql \
+		sh -c 'exec env MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -uroot' < scripts/seed_demo.sql

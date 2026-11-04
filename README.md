@@ -106,8 +106,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
   - 阿里云百炼 Qwen：`qwen3.8-flash`
   - 小米 MiMo：`mimo-v2.6-flash`
 - 用户自填 key 优先；未填写时仅 DeepSeek 可使用服务器默认 `LLM_API_KEY`。费用由对应厂商的 key 承担。
-- 需要读取目标库表结构（列 / 索引 / 表规模，只读）时设置 `AI_DB_PROBE_ENABLED=true`；DSN 只从任务快照读取，不会外发。
-- 命令行验证：`python -m app.ai.verify_ai_tools --run-id <id>`（工具与证据） / `python -m app.ai.verify_llm_client --provider deepseek`（客户端连通性）。
+- 目标库表结构读取（列 / 索引 / 表规模）是独立的只读工具，需设置 `AI_DB_PROBE_ENABLED=true`；连接信息只从任务快照读取，不会外发。
 
 ## 压测表单与模式转换
 

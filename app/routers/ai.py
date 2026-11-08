@@ -87,7 +87,7 @@ def start_diagnose(request: Request, run_id: str, user: Optional[dict] = Depends
     if not db.get_run(run_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     user_id = _user_id(user)
-    inflight = db.list_inflight_ai_jobs(run_id)
+    inflight = db.list_inflight_ai_jobs(run_id, user_id)
     if inflight:
         job = inflight[0]  # 已有进行中的诊断：复用该 job，不重复建
     elif db.count_inflight_ai_jobs_by_user(user_id) >= diagnose_runner.MAX_INFLIGHT_PER_USER:
@@ -104,10 +104,11 @@ def start_diagnose(request: Request, run_id: str, user: Optional[dict] = Depends
 def diagnose_fragment(request: Request, run_id: str, job_id: str, user: Optional[dict] = Depends(require_user)):
     if not db.get_run(run_id):
         raise HTTPException(status_code=404, detail="任务不存在")
+    user_id = _user_id(user)
     job = db.get_ai_job(job_id)
-    if not job or job["run_id"] != run_id:
+    if not job or job["run_id"] != run_id or job["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="诊断任务不存在")
-    return _fragment(request, run_id, job, _user_id(user))
+    return _fragment(request, run_id, job, user_id)
 
 
 def _fragment(request: Request, run_id: str, job: Optional[dict], user_id: str,

@@ -521,10 +521,11 @@ def get_ai_job(job_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def get_latest_ai_job(run_id: str) -> Optional[dict]:
+def get_latest_ai_job(run_id: str, user_id: str) -> Optional[dict]:
     row = _fetch_one(
-        "SELECT * FROM ai_jobs WHERE run_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (run_id,),
+        "SELECT * FROM ai_jobs WHERE run_id=? AND user_id=?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (run_id, user_id),
     )
     return dict(row) if row else None
 
@@ -537,10 +538,10 @@ def update_ai_job(job_id: str, fields: dict) -> None:
         conn.execute(f"UPDATE ai_jobs SET {sets} WHERE id=:id", fields)
 
 
-def list_inflight_ai_jobs(run_id: str) -> list:
+def list_inflight_ai_jobs(run_id: str, user_id: str) -> list:
     rows = _fetch_all(
-        "SELECT * FROM ai_jobs WHERE run_id=? AND status IN ('pending','running')",
-        (run_id,),
+        "SELECT * FROM ai_jobs WHERE run_id=? AND user_id=? AND status IN ('pending','running')",
+        (run_id, user_id),
     )
     return [dict(r) for r in rows]
 

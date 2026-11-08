@@ -65,7 +65,7 @@ def _ai_card_state(request: Request, run_id: str) -> dict:
     user_id = connection_manager.current_user_id(get_current_user(request))
     return {
         "ai": diagnose_runner.key_state(user_id),
-        "job_view": diagnose_runner.job_view(db.get_latest_ai_job(run_id)),
+        "job_view": diagnose_runner.job_view(db.get_latest_ai_job(run_id, user_id)),
     }
 
 

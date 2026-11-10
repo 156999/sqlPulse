@@ -9,14 +9,18 @@ from app.config import settings
 from app.services.collector import collector, read_per_sql_history
 from app.services.observability import build_event_timeline, build_snapshot, capacity_thresholds
 from app.services.sql_history import METRIC_SCOPES
+from app.auth import require_user
+from app.services import connection_manager, run_jobs
+from typing import Optional
+from fastapi import Depends
 
 router = APIRouter()
 
 
 @router.get("/api/runs/{run_id}/metrics")
-def get_metrics(run_id: str, ts_from: int = None, ts_to: int = None):
-    run = db.get_run(run_id)
-    if not run:
+def get_metrics(run_id: str, ts_from: int = None, ts_to: int = None, user: Optional[dict] = Depends(require_user)):
+    try: run_jobs.require_owned_run(connection_manager.current_user_id(user), run_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
     points = db.get_metrics(run_id, ts_from, ts_to)
     observability = build_snapshot(run, points)
@@ -33,8 +37,9 @@ def get_metrics(run_id: str, ts_from: int = None, ts_to: int = None):
 
 
 @router.get("/api/runs/{run_id}/events")
-def get_events(run_id: str):
-    if not db.get_run(run_id):
+def get_events(run_id: str, user: Optional[dict] = Depends(require_user)):
+    try: run_jobs.require_owned_run(connection_manager.current_user_id(user), run_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
     points = db.get_metrics(run_id)
     return {
@@ -46,17 +51,19 @@ def get_events(run_id: str):
 
 
 @router.get("/api/runs/{run_id}/per-sql-metrics")
-def get_per_sql_metrics(run_id: str):
+def get_per_sql_metrics(run_id: str, user: Optional[dict] = Depends(require_user)):
     """每条 SQL 的 P95/P99 等时序（来源 locust --csv-full-history）。"""
-    if not db.get_run(run_id):
+    try: run_jobs.require_owned_run(connection_manager.current_user_id(user), run_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
     path = settings.data_dir / "locust" / f"{run_id}_stats_history.csv"
     return read_per_sql_history(path)
 
 
 @router.get("/api/runs/{run_id}/stream")
-async def stream(run_id: str):
-    if not db.get_run(run_id):
+async def stream(run_id: str, user: Optional[dict] = Depends(require_user)):
+    try: run_jobs.require_owned_run(connection_manager.current_user_id(user), run_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
     q = collector.subscribe(run_id)
 

@@ -44,6 +44,14 @@ class DataGenExecutor:
                 job_id,
                 {"status": "running", "started_at": now_iso(), "log_path": str(log_path)},
             )
+            if job.get("owner_user_id"):
+                input_data = json.loads(job.get("input_json") or "{}")
+                if input_data.get("ai_generated"):
+                    from app.services.sql_executor import _log_line, split_sql_statements
+                    statements = split_sql_statements(input_data.get("content") or "")
+                    _log_line(log_path, f"[{job_id}] AI 生成 SQL（共 {len(statements)} 条）：")
+                    for index, statement in enumerate(statements, 1):
+                        _log_line(log_path, f"[{job_id}] SQL {index}: {' '.join(statement.split())}")
             event = threading.Event()
             self._cancel[job_id] = event
 

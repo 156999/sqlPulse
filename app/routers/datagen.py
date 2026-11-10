@@ -9,7 +9,7 @@ from loguru import logger
 from app import db
 from app.auth import get_current_user, require_user
 from app.config import settings
-from app.models import DataGenAnalyzeRequest, DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
+from app.models import DataGenAiSqlRequest, DataGenAnalyzeRequest, DataGenDependencyPlanRequest, DataGenJobCreate, DataGenMetadataRequest, DataGenRuleValidationRequest, DataGenTableListRequest
 from app.services import connection_manager
 from app.services.sql_executor import split_sql_statements
 from app.services.sql_grouping import describe_statements
@@ -173,9 +173,17 @@ def apply_datagen_rules(body: DataGenRuleValidationRequest, user: Optional[dict]
         return datagen_jobs.apply_rules_from_body(connection_manager.current_user_id(user), body)
     except (ValueError, TypeError, ArithmeticError) as exc:
         raise HTTPException(status_code=400, detail=f"应用数据库规则失败：{exc}")
+
+
+@router.post("/api/datagen/ai/generate-sql")
+def generate_datagen_ai_sql(body: DataGenAiSqlRequest, user: Optional[dict] = Depends(require_user)):
+    try:
+        return datagen_jobs.create_ai_job(connection_manager.current_user_id(user), body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.exception("apply datagen rules failed")
-        raise HTTPException(status_code=400, detail=f"应用数据库规则失败：{exc}")
+        logger.exception("AI datagen SQL generation failed")
+        raise HTTPException(status_code=502, detail=f"AI SQL 生成失败：{exc}")
 
 
 @router.get("/api/datagen/jobs/{job_id}")

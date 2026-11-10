@@ -1,4 +1,6 @@
 import argparse
+import asyncio
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -6,17 +8,41 @@ from mcp.server.fastmcp import FastMCP
 from app import db
 from app.config import settings
 from app.mcp import datagen_server
+from app.mcp import run_tools
 from app.services import connection_manager
+from app.services.collector import collector
+from app.services.report import generate_report
+from app.services.runner import runner
 
 
 INSTRUCTIONS = """
-SQL Pulse datagen MCP server.
+SQL Pulse MCP server for datagen and SQL load testing.
 
 Use saved SQL Pulse connections only. Tools never return database passwords.
 Read table metadata and validate rules before creating datagen SQL jobs.
 Dependency writes require confirm_dependency_writes=true.
 Shell datagen is not exposed through MCP.
+Load tests use saved connections only and are scoped to the configured user.
+Preview SQL before creating a run. MCP load is limited by server-side concurrency,
+duration and active-run caps. Poll metrics at a low rate.
 """
+
+
+@asynccontextmanager
+async def _runtime_lifespan(_server):
+    """Provide the same sampling and report finalization used by the web app."""
+    previous_callback = runner._on_finish
+    runner.set_on_finish(lambda run_id: generate_report(run_id))
+    collector_task = asyncio.create_task(collector.run_loop())
+    try:
+        yield {}
+    finally:
+        collector_task.cancel()
+        try:
+            await collector_task
+        except asyncio.CancelledError:
+            pass
+        runner.set_on_finish(previous_callback)
 
 
 def resolve_mcp_user(user_id: str | None = None, username: str | None = None) -> dict | None:
@@ -44,6 +70,7 @@ def create_mcp_server(user: dict | None) -> FastMCP:
         instructions=INSTRUCTIONS.strip(),
         host=settings.mcp_host,
         port=settings.mcp_port,
+        lifespan=_runtime_lifespan,
     )
 
     @server.tool(description="列出当前 SQL Pulse 用户可用的已保存数据库连接；不返回数据库密码。")
@@ -115,6 +142,37 @@ def create_mcp_server(user: dict | None) -> FastMCP:
     @server.tool(description="停止当前用户自己的运行中造数任务。")
     def stop_datagen_job(job_id: str) -> dict:
         return datagen_server.stop_datagen_job(user, job_id)
+
+    @server.tool(description="静态解析并预览压测 SQL/任务组，不连接或执行目标数据库。")
+    def preview_sql_run(sql_content: str | None = None, groups: list[dict] | None = None,
+                        variables: dict[str, str] | None = None) -> dict:
+        return run_tools.preview_sql_run(sql_content, groups, variables)
+
+    @server.tool(description="使用已保存连接创建 SQL 压测任务。调用前应确认目标和负载参数。")
+    def create_sql_run(connection_id: str, name: str, concurrency: int, spawn_rate: int,
+                       duration_sec: int, sql_content: str | None = None,
+                       groups: list[dict] | None = None,
+                       variables: dict[str, str] | None = None,
+                       sql_source: str = "paste", confirm_write_sql: bool = False) -> dict:
+        return run_tools.create_sql_run(user, connection_id, name, concurrency, spawn_rate,
+                                        duration_sec, sql_content, groups, variables, sql_source,
+                                        confirm_write_sql)
+
+    @server.tool(description="查询当前用户自己的压测任务状态和摘要。")
+    def get_sql_run(run_id: str) -> dict:
+        return run_tools.get_sql_run(user, run_id)
+
+    @server.tool(description="查询当前用户任务的最近压测指标；每次最多 600 点。")
+    def get_sql_run_metrics(run_id: str, since_ts: int | None = None, limit: int = 120) -> dict:
+        return run_tools.get_sql_run_metrics(user, run_id, since_ts, limit)
+
+    @server.tool(description="停止当前用户自己的运行中压测任务。")
+    def stop_sql_run(run_id: str) -> dict:
+        return run_tools.stop_sql_run(user, run_id)
+
+    @server.tool(description="读取当前用户已结束任务的 L0/L1 报告；报告尚未生成时返回 not_ready。")
+    def get_sql_run_report(run_id: str) -> dict:
+        return run_tools.get_sql_run_report(user, run_id)
 
     return server
 

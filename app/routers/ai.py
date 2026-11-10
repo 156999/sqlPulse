@@ -14,6 +14,7 @@ from app.auth import require_user
 from app.routers.pages import _profile_context
 from app.services import connection_manager
 from app.templating import templates
+from app.services.run_jobs import _owned_run
 
 router = APIRouter()
 
@@ -43,9 +44,8 @@ def delete_ai_key(user: Optional[dict] = Depends(require_user)):
 
 @router.post("/api/runs/{run_id}/ai/diagnose")
 def start_diagnose(request: Request, run_id: str, user: Optional[dict] = Depends(require_user)):
-    if not db.get_run(run_id):
-        raise HTTPException(status_code=404, detail="任务不存在")
     user_id = _user_id(user)
+    _owned_run(user_id, run_id)
     inflight = db.list_inflight_ai_jobs(run_id)
     if inflight:
         job = inflight[0]  # 已有进行中的诊断：复用该 job，不重复建
@@ -61,12 +61,12 @@ def start_diagnose(request: Request, run_id: str, user: Optional[dict] = Depends
 
 @router.get("/api/runs/{run_id}/ai/diagnose/{job_id}/fragment")
 def diagnose_fragment(request: Request, run_id: str, job_id: str, user: Optional[dict] = Depends(require_user)):
-    if not db.get_run(run_id):
-        raise HTTPException(status_code=404, detail="任务不存在")
+    user_id = _user_id(user)
+    _owned_run(user_id, run_id)
     job = db.get_ai_job(job_id)
     if not job or job["run_id"] != run_id:
         raise HTTPException(status_code=404, detail="诊断任务不存在")
-    return _fragment(request, run_id, job, _user_id(user))
+    return _fragment(request, run_id, job, user_id)
 
 
 def _fragment(request: Request, run_id: str, job: Optional[dict], user_id: str,

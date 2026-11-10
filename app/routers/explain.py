@@ -7,29 +7,32 @@
 注意：产物只在 run 走到收尾之后才存在。状态为 pending/running 的 run 打开此页
 会看到空态卡片，这是预期行为，不是 404。
 """
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
 from app.services import explain_probe, explain_view
 from app.templating import templates
+from app.auth import get_current_user, require_user
+from app.services import connection_manager
+from app.services.run_jobs import _owned_run
 
 router = APIRouter()
 
 
 @router.get("/api/runs/{run_id}/explain")
-def get_explain(run_id: str):
+def get_explain(run_id: str, user=Depends(require_user)):
     """原始产物。不存在时 404 —— 与 `/api/runs/{run_id}` 的口径一致。"""
+    _owned_run(connection_manager.current_user_id(user), run_id)
     artifact = explain_probe.load_artifact(run_id)
     if artifact is None:
-        if not db.get_run(run_id):
-            raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 没有 EXPLAIN 采集产物")
     return artifact
 
 
 @router.get("/runs/{run_id}/explain")
 def explain_page(request: Request, run_id: str):
-    run = db.get_run(run_id)
+    user_id = connection_manager.current_user_id(get_current_user(request))
+    run = db.get_run_for_user(user_id, run_id)
     if not run:
         return templates.TemplateResponse(
             request, "error.html", {"message": f"任务 {run_id} 不存在"}, status_code=404

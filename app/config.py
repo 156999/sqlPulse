@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     mcp_username: Optional[str] = None
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8765
+    mcp_run_max_concurrency: int = 100
+    mcp_run_max_duration_sec: int = 1800
+    mcp_run_max_active_per_user: int = 1
+    mcp_run_max_creates_per_hour: int = 10
 
     @model_validator(mode="after")
     def _require_secret_key_when_auth_enabled(self):

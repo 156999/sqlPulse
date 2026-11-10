@@ -38,7 +38,8 @@ def new_run_page(request: Request):
 
 @router.get("/runs")
 def runs_page(request: Request):
-    runs = db.list_runs()
+    user_id = connection_manager.current_user_id(get_current_user(request))
+    runs = db.list_runs_for_user(user_id)
     for r in runs:
         r["has_report"] = db.get_report(r["id"]) is not None
     return templates.TemplateResponse(request, "runs.html", {"runs": runs})
@@ -46,7 +47,8 @@ def runs_page(request: Request):
 
 @router.get("/runs/{run_id}/monitor")
 def monitor_page(request: Request, run_id: str):
-    run = db.get_run(run_id)
+    user_id = connection_manager.current_user_id(get_current_user(request))
+    run = db.get_run_for_user(user_id, run_id)
     if not run:
         return templates.TemplateResponse(request, "error.html", {"message": f"任务 {run_id} 不存在"}, status_code=404)
     from app.services.runner import parse_sql_tasks
@@ -85,7 +87,8 @@ def profile_page(request: Request):
 
 def _report_context(request: Request, run_id: str) -> Optional[dict]:
     """报告页模板上下文；任务不存在返回 None。"""
-    run = db.get_run(run_id)
+    user_id = connection_manager.current_user_id(get_current_user(request))
+    run = db.get_run_for_user(user_id, run_id)
     if not run:
         return None
     report = db.get_report(run_id)

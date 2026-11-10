@@ -18,6 +18,7 @@ _lock = threading.RLock()
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   id            TEXT PRIMARY KEY,
+  owner_user_id TEXT,
   name          TEXT NOT NULL,
   status        TEXT NOT NULL,
   sql_source    TEXT NOT NULL,
@@ -86,6 +87,14 @@ CREATE TABLE IF NOT EXISTS reports (
   l0_json       TEXT NOT NULL,
   l1_json       TEXT NOT NULL,
   md_path       TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS run_audit (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  event         TEXT NOT NULL,
+  details_json  TEXT NOT NULL DEFAULT '{}',
   created_at    TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS datagen_jobs (
@@ -245,6 +254,8 @@ def init_schema() -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN groups_json TEXT NOT NULL DEFAULT '[]'")
         if "variables_json" not in run_columns:
             conn.execute("ALTER TABLE runs ADD COLUMN variables_json TEXT NOT NULL DEFAULT '{}'")
+        if "owner_user_id" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN owner_user_id TEXT")
         for col, typ in {
             "process_exit_code": "INTEGER",
             "final_metrics_json": "TEXT",
@@ -502,9 +513,9 @@ def create_run(row: dict) -> None:
     row = {"variables_json": "{}", "groups_json": "[]", **row}
     with tx() as conn:
         conn.execute(
-            "INSERT INTO runs (id,name,status,sql_source,sql_content,variables_json,groups_json,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
-            " VALUES (:id,:name,:status,:sql_source,:sql_content,:variables_json,:groups_json,:concurrency,:spawn_rate,:duration_sec,:db_dsn_json,:created_at)",
-            row,
+            "INSERT INTO runs (id,owner_user_id,name,status,sql_source,sql_content,variables_json,groups_json,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
+            " VALUES (:id,:owner_user_id,:name,:status,:sql_source,:sql_content,:variables_json,:groups_json,:concurrency,:spawn_rate,:duration_sec,:db_dsn_json,:created_at)",
+            {"owner_user_id": None, **row},
         )
 
 
@@ -513,8 +524,18 @@ def get_run(run_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_run_for_user(user_id: str, run_id: str) -> Optional[dict]:
+    row = _fetch_one("SELECT * FROM runs WHERE id=? AND owner_user_id=?", (run_id, user_id))
+    return dict(row) if row else None
+
+
 def list_runs() -> list:
     rows = _fetch_all("SELECT * FROM runs ORDER BY created_at DESC")
+    return [dict(r) for r in rows]
+
+
+def list_runs_for_user(user_id: str) -> list:
+    rows = _fetch_all("SELECT * FROM runs WHERE owner_user_id=? ORDER BY created_at DESC", (user_id,))
     return [dict(r) for r in rows]
 
 
@@ -524,6 +545,30 @@ def update_run(run_id: str, fields: dict) -> None:
     fields["id"] = run_id
     with tx() as conn:
         conn.execute(f"UPDATE runs SET {sets} WHERE id=:id", fields)
+
+
+def count_active_runs_for_user(user_id: str) -> int:
+    row = _fetch_one(
+        "SELECT COUNT(*) AS n FROM runs WHERE owner_user_id=? AND status IN ('pending','running')",
+        (user_id,),
+    )
+    return int(row["n"] if row else 0)
+
+
+def count_recent_run_creates_for_user(user_id: str, since: str) -> int:
+    row = _fetch_one(
+        "SELECT COUNT(*) AS n FROM run_audit WHERE user_id=? AND event='created' AND created_at>=?",
+        (user_id, since),
+    )
+    return int(row["n"] if row else 0)
+
+
+def insert_run_audit(user_id: str, run_id: str, event: str, details: dict, created_at: str) -> None:
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO run_audit (user_id,run_id,event,details_json,created_at) VALUES (?,?,?,?,?)",
+            (user_id, run_id, event, json.dumps(details, ensure_ascii=False), created_at),
+        )
 
 
 def create_datagen_job(row: dict) -> None:

@@ -15,6 +15,7 @@ from app.auth import require_user
 from app.routers.pages import _profile_context
 from app.services import connection_manager
 from app.templating import templates
+from app.services import run_jobs
 
 router = APIRouter()
 
@@ -84,7 +85,8 @@ def delete_ai_key(provider: str = Form(""), user: Optional[dict] = Depends(requi
 
 @router.post("/api/runs/{run_id}/ai/diagnose")
 def start_diagnose(request: Request, run_id: str, user: Optional[dict] = Depends(require_user)):
-    if not db.get_run(run_id):
+    try: run_jobs.require_owned_run(_user_id(user), run_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail="任务不存在")
     user_id = _user_id(user)
     inflight = db.list_inflight_ai_jobs(run_id, user_id)
@@ -102,7 +104,8 @@ def start_diagnose(request: Request, run_id: str, user: Optional[dict] = Depends
 
 @router.get("/api/runs/{run_id}/ai/diagnose/{job_id}/fragment")
 def diagnose_fragment(request: Request, run_id: str, job_id: str, user: Optional[dict] = Depends(require_user)):
-    if not db.get_run(run_id):
+    try: run_jobs.require_owned_run(_user_id(user), run_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail="任务不存在")
     user_id = _user_id(user)
     job = db.get_ai_job(job_id)

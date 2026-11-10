@@ -18,6 +18,7 @@ _lock = threading.RLock()
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   id            TEXT PRIMARY KEY,
+  owner_user_id TEXT,
   name          TEXT NOT NULL,
   status        TEXT NOT NULL,
   sql_source    TEXT NOT NULL,
@@ -270,6 +271,8 @@ def init_schema() -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN groups_json TEXT NOT NULL DEFAULT '[]'")
         if "variables_json" not in run_columns:
             conn.execute("ALTER TABLE runs ADD COLUMN variables_json TEXT NOT NULL DEFAULT '{}'")
+        if "owner_user_id" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN owner_user_id TEXT")
         for col, typ in {
             "process_exit_code": "INTEGER",
             "final_metrics_json": "TEXT",
@@ -582,11 +585,11 @@ def recover_datagen_orphans() -> int:
 
 
 def create_run(row: dict) -> None:
-    row = {"variables_json": "{}", "groups_json": "[]", **row}
+    row = {"variables_json": "{}", "groups_json": "[]", "owner_user_id": None, **row}
     with tx() as conn:
         conn.execute(
-            "INSERT INTO runs (id,name,status,sql_source,sql_content,variables_json,groups_json,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
-            " VALUES (:id,:name,:status,:sql_source,:sql_content,:variables_json,:groups_json,:concurrency,:spawn_rate,:duration_sec,:db_dsn_json,:created_at)",
+            "INSERT INTO runs (id,owner_user_id,name,status,sql_source,sql_content,variables_json,groups_json,concurrency,spawn_rate,duration_sec,db_dsn_json,created_at)"
+            " VALUES (:id,:owner_user_id,:name,:status,:sql_source,:sql_content,:variables_json,:groups_json,:concurrency,:spawn_rate,:duration_sec,:db_dsn_json,:created_at)",
             row,
         )
 

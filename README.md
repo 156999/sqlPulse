@@ -161,7 +161,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 - 本地 stdio 启动（供桌面 MCP 客户端使用）：
 
   ```bash
-  python -m app.mcp.server --user-id <user_id> --transport stdio
+  python -m app.mcp.server --user-id <user_id> --transport streamable-http --host 127.0.0.1 --port 8765
   ```
 
   用户上下文也可用 `MCP_USER_ID` / `MCP_USERNAME` 环境变量指定。

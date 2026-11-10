@@ -152,6 +152,7 @@
 
   <div class="form-actions">
     <button type="submit" id="btn-submit" class="primary">开始造数</button>
+    <button type="button" id="btn-ai-datagen" class="secondary">AI 造数</button>
     <span id="submit-result" class="hint"></span>
   </div>
 </form>
@@ -430,6 +431,19 @@ async function readDatagenResponse(resp) {
   }
   return data;
 }
+function datagenErrorMessage(detail, fallback='请求失败') {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map(item => {
+    if (typeof item === 'string') return item;
+    if (item && typeof item === 'object') {
+      const loc = Array.isArray(item.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
+      return [loc, item.msg || item.message || JSON.stringify(item)].filter(Boolean).join('：');
+    }
+    return String(item);
+  }).join('；');
+  if (detail && typeof detail === 'object') return detail.message || detail.msg || JSON.stringify(detail);
+  return fallback;
+}
 
 async function testConn(url, options, resultId) {
   const r = $id(resultId);
@@ -575,7 +589,7 @@ function renderFormFields(metadata, keepRules=false) {
     const tr=document.createElement('tr');
     const mode=document.createElement('select');
     [['rand','随机整数'],['randf','随机小数'],['randstr','随机字符串'],['pick','枚举'],['randdate','随机日期'],['randdt','随机日期时间'],['sample','已有数据抽样'],['derived','数据库计算规则'],['omit','跳过']].forEach(([v,t])=>{const option=new Option(t,v);if(v==='sample'&&(uniqueColumns.has(col.name)||col.key==='PRI'||col.key==='UNI')){option.disabled=true;option.textContent='已有数据抽样（唯一字段不可用）';}if(v==='derived')option.disabled=rule.generator!=='derived';mode.add(option);});
-    mode.value=rule.generator; mode.addEventListener('change',()=>{const previous=rule.generator;rule.generator=mode.value;if(mode.value==='sample'){rule.base_generator=previous==='sample'?(rule.base_generator||'rand'):previous;}rule.status='unapplied';formRulesValid=false;renderFormFields(formMetadata,true);});
+  mode.value=rule.generator; mode.addEventListener('change',()=>{const previous=rule.generator;rule.generator=mode.value;if(mode.value==='sample'){rule.base_generator=previous==='sample'?(rule.base_generator||'rand'):previous;}rule.status='unapplied';formRulesValid=false;renderFormFields(formMetadata,true);});
     const ratio=document.createElement('input');ratio.type='number';ratio.min=0;ratio.max=100;ratio.value=rule.sample_ratio??100;ratio.disabled=rule.generator!=='sample';ratio.addEventListener('input',()=>{rule.sample_ratio=Number(ratio.value);rule.status='unapplied';formRulesValid=false;});
     const status=document.createElement('span');status.className=rule.status==='adjusted'?'badge badge-running':'hint';status.textContent={adjusted:'已调整',passed:'已通过',unapplied:'未应用'}[rule.status]||rule.status;
     const values=[col.name,[col.column_type,col.max_length?'长度≤'+col.max_length:'',col.nullable?'可空':'NOT NULL'].filter(Boolean).join(' · ')];values.forEach(text=>{const td=document.createElement('td');td.textContent=text;tr.append(td);});
@@ -602,6 +616,25 @@ async function applyFormRules() {
     hint.textContent=(data.ok?'✓ ':'✗ ')+`调整 ${data.changes.length} 项`+(summary?'：'+summary:'')+(data.errors.length?'；错误：'+data.errors.map(x=>x.column+' '+x.message).join('；'):'');hint.className=data.ok?'hint ok':'hint err';
   } catch(e){hint.textContent='✗ '+e.message;hint.className='hint err';}
 }
+async function submitAiDatagen() {
+  const button=$id('btn-ai-datagen'), result=$id('submit-result');
+  const table=$id('f-form-table').value.trim(), row_count=+$id('f-form-row-count').value||1;
+  if(activeMode()!=='form'){result.textContent='✗ AI 造数仅适用于单表表单模式';result.className='hint err';return;}
+  if(!formMetadata || !formRulesValid){result.textContent='✗ 请先读取表结构并应用通过的数据库规则';result.className='hint err';return;}
+  button.disabled=true;$id('btn-submit').disabled=true;result.textContent='AI 正在生成 SQL 并创建造数任务…';result.className='hint';
+  try {
+    const conn=datagenConnectionBody();if(conn.connection_id===null)throw Error('请先选择数据库连接');
+    const dependency_strategy=$id('f-dependency-strategy').value;
+    const dependency_plan=dependencyPlan||{};
+    const confirm_dependency_writes=$id('f-confirm-dependency-writes').checked;
+    if(dependency_strategy!=='target_only'&&(dependency_plan.dependencies||[]).some(item=>item.planned_rows>0)&&!confirm_dependency_writes)throw Error('请确认允许向依赖表写入数据');
+    const resp=await fetch('/api/datagen/ai/generate-sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...conn,name:$id('f-name').value.trim(),table,row_count,rules:Object.values(formRules),dependency_strategy,dependency_plan,confirm_dependency_writes})});
+    const data=await readDatagenResponse(resp);if(!resp.ok)throw Error(datagenErrorMessage(data.detail,'生成失败'));
+    result.textContent=`✓ AI 已生成并开始造数（${data.statement_count} 条 SQL），任务 ${data.job_id}`;result.className='hint ok';setTimeout(()=>location.reload(),1200);
+  } catch(e) { result.textContent='✗ '+e.message;result.className='hint err'; }
+  finally { button.disabled=false;$id('btn-submit').disabled=false; }
+}
+$id('btn-ai-datagen').addEventListener('click',submitAiDatagen);
 function formRuleExpression(rule,col) {
   const p=rule.params||{}; let base=rule.generator==='sample'?(rule.base_generator||defaultFormRule(col).generator):rule.generator;
   let expr;

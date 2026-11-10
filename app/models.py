@@ -188,3 +188,10 @@ class DataGenTableListRequest(BaseModel):
 class DataGenRuleValidationRequest(DataGenMetadataRequest):
     rules: list[dict] = Field(default_factory=list)
     row_count: int = Field(default=1, ge=1, le=1_000_000)
+
+
+class DataGenAiSqlRequest(DataGenRuleValidationRequest):
+    name: str = Field(min_length=1, max_length=100)
+    dependency_strategy: Literal["target_only", "direct_dependencies", "full_dependencies"] = "target_only"
+    dependency_plan: dict = Field(default_factory=dict)
+    confirm_dependency_writes: bool = False

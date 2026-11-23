@@ -1,0 +1,761 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Multi-table Import' if standalone else 'Data Generation' }} · SQL Pulse{% endblock %}
+{% block nav_datagen %}{% if not standalone %}class="active"{% endif %}{% endblock %}
+{% block nav_datagen_multi %}class="nav-sub{% if standalone %} active{% endif %}"{% endblock %}
+{% block content %}
+{% set mode = initial_mode or 'form' %}
+<h1>{{ 'Multi-table Import' if standalone else 'Data Generation' }}</h1>
+
+<form id="datagen-form" class="card">
+  <div class="form-row">
+    <label>Test Name</label>
+    <input type="text" id="f-name" required maxlength="100" placeholder="For example: Order data supplement 1 All the way. ">
+  </div>
+
+  <fieldset>
+    <legend>Target Database</legend>
+    <div class="conn-switch">
+      <span class="seg">
+        <button type="button" class="seg-btn {% if connections %}active{% endif %}" data-conn-mode="saved">Saved Connection</button>
+        <button type="button" class="seg-btn {% if not connections %}active{% endif %}" data-conn-mode="temp">Temporary Connection</button>
+      </span>
+    </div>
+    <div id="conn-saved" {% if not connections %}style="display:none"{% endif %}>
+      <div class="form-row">
+        <label>My Connections</label>
+        <select id="f-connection-id">
+          {% for conn in connections %}
+          <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.host }}:{{ conn.port }}/{{ conn.database }})</option>
+          {% else %}
+          <option value="">No saved connections. Create one on the Connections page.</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-test-saved" class="secondary">Test Connection</button>
+        <span id="db-test-result" class="hint"></span>
+      </div>
+    </div>
+    <div id="conn-temp" {% if connections %}style="display:none"{% endif %}>
+      <div class="grid5">
+        <div><label>Host</label><input type="text" id="f-host" value="{{ default_dsn.host }}"></div>
+        <div><label>Port</label><input type="number" id="f-port" value="{{ default_dsn.port }}"></div>
+        <div><label>User</label><input type="text" id="f-user" value="{{ default_dsn.user }}"></div>
+        <div><label>Password</label><input type="password" id="f-password" value="{{ default_dsn.password }}"></div>
+        <div><label>Database</label><input type="text" id="f-database" value="{{ default_dsn.database }}"></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-test-db" class="secondary">Test Connection</button>
+        <span id="db-test-result-temp" class="hint"></span>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>{% if standalone %}Import Method {% else %}Generation Mode {% endif %}</legend>
+    {% if not standalone %}
+    <div class="tabs">
+      <button type="button" class="tab {% if mode == 'form' %}active{% endif %}" data-mode="form">Form</button>
+      <button type="button" class="tab {% if mode == 'sql' %}active{% endif %}" data-mode="sql">SQL</button>
+      <button type="button" class="tab {% if mode == 'shell' %}active{% endif %}" data-mode="shell">Shell</button>
+    </div>
+    {% endif %}
+
+    <div id="panel-form"{% if mode != 'form' %} style="display:none"{% endif %}>
+      <div class="grid3 datagen-options">
+        <div><label>Target Table</label><input type="text" id="f-form-table" list="form-table-options" autocomplete="off" placeholder=" Enter a keyword or select a table "><datalist id="form-table-options"></datalist></div>
+        <div><label>Rows to Insert</label><input type="number" id="f-form-row-count" value="1" min="1" max="1000000"></div>
+        <div class="form-actions datagen-rule-actions"><button type="button" id="btn-load-form-table" class="secondary">Read Table Schema</button><button type="button" id="btn-apply-form-rules" class="secondary" disabled>Apply Database Rules</button></div>
+      </div>
+      <p class="hint">SQL Pulse reads column names and types. By default, it skips auto-increment columns, generated columns, and columns with default values.</p>
+      <div id="form-metadata-result" class="hint"></div>
+      <details class="advice advice-info" id="dependency-plan-panel">
+        <summary>Dependencies and Unique Value Capacity</summary>
+        <div class="form-row"><label>Dependency Strategy</label><select id="f-dependency-strategy"><option value="target_only" selected>Generate Target Table Only</option><option value="direct_dependencies">Automatically supplement the direct-dependent table (planned preview)</option><option value="full_dependencies">Automatically complete dependencies chain (plan preview)</option></select></div>
+        <div id="dependency-plan-result" class="hint"> Read the target table schema to analyze dependencies.</div>
+        <label><input type="checkbox" id="f-confirm-dependency-writes">  I understand that this job will write to dependent tables.</label>
+      </details>
+      <div class="variable-scroll"><table class="table metadata-table"><thead><tr><th>Fields</th><th>Type/Limits</th><th>Generation Method</th><th>Generate Parameters</th><th>Sample %</th><th>Status</th></tr></thead><tbody id="form-field-list"></tbody></table></div>
+    </div>
+
+    <div id="panel-sql"{% if mode != 'sql' %} style="display:none"{% endif %}>
+      <div class="grid3 datagen-options">
+        <div><label>Rows to Insert</label><input type="number" id="f-row-count" value="1" min="1" max="1000000"><span class="hint"> Repeats per Statement </span></div>
+      </div>
+      <textarea id="f-sql" rows="12" placeholder="INSERT INTO orders (uid, amount, status, created_at) VALUES (1, 10.5, 'new', NOW());"></textarea>
+      <p class="hint">SQL placeholders such as rand, randf, pick, pickw, randstr, randdate, randdt, and uuid are regenerated before each INSERT. Named variables are reused within that INSERT.</p>
+      <p class="hint">Use sample('table', 'column', {'mode':'uniform|weighted|recent','sample_size':10000}) in SQL to build a read-only sample cache at the start of the job.</p>
+      <details class="advice advice-info" id="field-rules-panel" open>
+        <summary>Column Rules and Database Constraints</summary>
+        <p class="hint"> Choose a target table to load column types, lengths, nullability, primary keys, and unique constraints. Validate the rules before submitting. </p>
+        <div class="grid3 datagen-options">
+          <div><label>Target Table</label><input type="text" id="f-target-table" placeholder="For example:  orders"></div>
+          <div><label>Source of rules</label><select id="f-rule-source"><option value="metadata">Database metadata</option><option value="user">User Configuration Priority</option></select></div>
+          <div class="form-actions datagen-rule-actions">
+            <button type="button" id="btn-refresh-metadata" class="secondary">Refresh Table Schema</button>
+            <button type="button" id="btn-validate-rules" class="secondary">Validate Against Database Constraints</button>
+          </div>
+        </div>
+        <div id="metadata-result" class="hint"></div>
+        <div class="variable-scroll"><table class="table metadata-table"><thead><tr><th>Fields</th><th>Type / Limits</th><th>Unique</th><th>Nullable</th><th>Data sources</th></tr></thead><tbody id="metadata-field-list"></tbody></table></div>
+      </details>
+      <div id="datagen-variable-editor" class="form-row">
+        <label>Named Variables (use Insert Placeholder after setup)</label>
+        <p class="hint"> Put the cursor in the SQL editor, then click Insert Placeholder. Variables are generated for each INSERT. </p>
+        <div class="variable-scroll"><table class="table variable-table"><thead><tr><th>Name</th><th>Generation Type</th><th>Parameters</th><th>Actions</th></tr></thead><tbody id="datagen-variable-list"></tbody></table></div>
+        <button type="button" id="btn-add-datagen-variable" class="secondary">+  Add Variable</button>
+      </div>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">Upload .sql File
+          <input type="file" id="f-sql-file" accept=".sql,.txt" hidden>
+</label>
+        <button type="button" id="btn-example-sql" class="secondary">Load Example</button>
+      </div>
+    </div>
+
+    <div id="panel-multi"{% if mode != 'multi' %} style="display:none"{% endif %}>
+      <div class="grid3 datagen-options">
+        <div><label>Parallel Table Groups</label><input type="number" id="f-multi-concurrency" value="4" min="1" max="16"><span class="hint">Maximum tables written in parallel (up to 16)</span></div>
+        <div><label>Repeats per Statement</label><input type="number" id="f-multi-row-count" value="1" min="1" max="1000000"><span class="hint"> Use 1 to import each statement once</span></div>
+        <div class="form-actions datagen-rule-actions"><button type="button" id="btn-analyze-multi" class="secondary">Analyze Groups</button></div>
+      </div>
+      <textarea id="f-multi-sql" rows="12" placeholder="-- Multiple tables can be mixed in the same file, and the system will be automatically grouped by target table.&#10;INSERT INTO orders (uid, amount) VALUES (1, 10.5);&#10;INSERT INTO stock (sku, qty) VALUES ('SKU1', 5);"></textarea>
+      <p class="hint">SQL Pulse groups statements by target table and preserves their original order within each group. A failure in one table does not stop the other groups.</p>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">Upload .sql File
+          <input type="file" id="f-multi-file" accept=".sql,.txt" hidden>
+</label>
+      </div>
+      <div id="multi-analysis" class="hint">Paste or upload SQL, then choose Analyze Groups to preview statement counts per table. </div>
+      <div class="variable-scroll" id="multi-preview" style="display:none">
+        <table class="table"><thead><tr><th>Group</th><th>Number of statements</th></tr></thead><tbody id="multi-preview-body"></tbody></table>
+      </div>
+    </div>
+
+    <div id="panel-shell"{% if mode != 'shell' %} style="display:none"{% endif %}>
+      <textarea id="f-script" rows="12" placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;# Use TARGET_DB_* environment variables to connect to the database"></textarea>
+      <div class="form-actions">
+        <label class="btn secondary file-btn">Upload scripts
+          <input type="file" id="f-script-file" accept=".sh,.bash,.txt" hidden>
+</label>
+        <button type="button" id="btn-example-shell" class="secondary">Load Example</button>
+      </div>
+      <details class="advice advice-info">
+        <summary>Script Environment Variables</summary>
+        <pre class="sql-view">{{ env_vars|join('\n') }}</pre>
+      </details>
+      <div id="shell-switch-hint" class="hint {% if script_enabled %}ok{% else %}err{% endif %}">
+        {% if script_enabled %}Shell  Execute Switches Enabled {% else %}Shell  Execute switch not open, submit Shell The mission will be rejected. {% endif %}
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" id="btn-submit" class="primary">Start Data Generation</button>
+    <button type="button" id="btn-ai-datagen" class="secondary">Generate SQL with AI</button>
+    <span id="submit-result" class="hint"></span>
+  </div>
+</form>
+
+<h2 class="section-title">Job History</h2>
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr><th>Created</th><th>Name</th><th>Modalities</th><th>Status</th><th>Impact Rows</th><th>Error message</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td>{{ job.created_at or '-' }}</td>
+        <td>{{ job.name }}</td>
+        <td><code>{{ job.mode }}</code></td>
+        <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+        <td>{% if job.rows_affected is not none %}{{ job.rows_affected }}{% else %}-{% endif %}</td>
+        <td class="err-cell">{{ (job.error_msg or '-')|ui_text }}</td>
+        <td class="ops">
+          <a href="/api/datagen/jobs/{{ job.id }}/log" target="_blank">Log</a>
+          {% if job.status == 'running' %}
+            <a href="#" class="stop-job" data-id="{{ job.id }}">Stop</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">There are no tasks left.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+const LS_KEY = 'sqlpulse.datagen.form';
+// /datagen/multi  Sub-column specifies the initial mode by the service and does not render the tab bar on the page
+const INITIAL_MODE = {{ (initial_mode or '') | tojson }};
+const scriptEnabled = {{ 'true' if script_enabled else 'false' }};
+const maxSqlChars = {{ max_sql_chars }};
+const maxScriptChars = {{ max_script_chars }};
+
+function $id(s) { return document.getElementById(s); }
+function dsn() {
+  return {host: $id('f-host').value, port: +$id('f-port').value, user: $id('f-user').value,
+          password: $id('f-password').value, database: $id('f-database').value};
+}
+const datagenTypes = {rand:' Random integer number ', randf:' Random decimal', pick:'Random enumeration', randstr:'Random string ', randdate:'Random date', randdt:'Random date time', uuid:'UUID', sample:'Sample of data available '};
+let datagenVariables = [], datagenEditor = null, datagenSelection = [0, 0], datagenMetadata = null;
+let formMetadata = null, formRules = {}, formRulesValid = false, formVariables = {};
+const datagenDefaults = {rand:['1','10000'], randf:['0','100','2'], pick:['new','paid'], randstr:['16'], randdate:['2026-01-01','2026-12-31'], randdt:['2026-01-01 00:00:00','2026-12-31 23:59:59'], uuid:[], sample:['users','id','100','rand(1,10000)']};
+function clientId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+function datagenRememberEditor(node) {
+  ['focus','click','keyup','select','blur'].forEach(event => node.addEventListener(event, () => { datagenEditor = node; datagenSelection = [node.selectionStart, node.selectionEnd]; }));
+}
+function datagenLiteral(value) { return JSON.stringify(String(value)); }
+function datagenExpression(row) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(row.name)) throw Error(' Variable names shall be letters, numbers, underlined and cannot start with numbers ');
+  const args = row.args || [];
+  if (row.type === 'uuid') return 'uuid()';
+  if (row.type === 'sample') {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(args[0] || '') || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(args[1] || '')) throw Error('sample  Form names and listings must be security identifiers ');
+    const ratio = Number(args[2]);
+    if (!Number.isFinite(ratio) || ratio < 0 || ratio > 100) throw Error('sample  The ratio must be  0～100');
+    if (ratio < 100) {
+      if (!args[3] || !/^[A-Za-z]+\s*\(.*\)$/.test(args[3])) throw Error('sample  Less than 100% , you have to fill in a randomly generated expression');
+      return `sample(${datagenLiteral(args[0])},${datagenLiteral(args[1])},{'sample_ratio':${ratio},'random':${datagenLiteral(args[3])}})`;
+    }
+    return `sample(${datagenLiteral(args[0])},${datagenLiteral(args[1])},{'sample_ratio':100})`;
+  }
+  if (row.type === 'pick') {
+    if (!args.length || args.some(v => !String(v).trim())) throw Error(' At least one non-empty candidate is required for the enumeration');
+    return 'pick(' + args.map(datagenLiteral).join(',') + ')';
+  }
+  if (row.type === 'rand' || row.type === 'randstr') {
+    if (!args.every(v => /^-?\d+$/.test(String(v).trim()))) throw Error(row.type + '  Parameters must be integer');
+  }
+  if (row.type === 'randf') {
+    if (!args[0] || !args[1] || !args.every((v,i) => i === 2 ? /^\d+$/.test(String(v)) : Number.isFinite(Number(v)))) throw Error(' Invalid random decimal parameter');
+  }
+  if (row.type === 'randdate' && !/^\d{4}-\d{2}-\d{2}$/.test(args[0]) ) throw Error(' The date format should read  YYYY-MM-DD');
+  if (row.type === 'randdt' && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(args[0])) throw Error('Date time format invalid ');
+  return row.type + '(' + args.map((v,i) => ['randdate','randdt'].includes(row.type) || (row.type === 'pick') ? datagenLiteral(v) : String(v)).join(',') + ')';
+}
+function datagenVariableText() {
+  const result = {};
+  datagenVariables.forEach(row => { if (row.name.trim()) result[row.name.trim()] = datagenExpression(row); });
+  return result;
+}
+function loadDatagenVariables(value) {
+  datagenVariables = [];
+  if (typeof value === 'string') value.split('\n').forEach(line => { const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/); if (m) datagenVariables.push({id: clientId(), name:m[1], type:'rand', args:['1','10000']}); });
+  else Object.entries(value || {}).forEach(([name, expression]) => { const m = String(expression).match(/^([A-Za-z]+)\((.*)\)$/); datagenVariables.push({id:clientId(), name, type:m && datagenTypes[m[1]] ? m[1] : 'rand', args:m ? (m[1] === 'sample' ? [m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[1] || 'users', m[2].match(/['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/ )?.[2] || 'id', '100', 'rand(1,10000)'] : m[2].split(',').map(x=>x.trim().replace(/^['"]|['"]$/g,''))) : ['1','10000']}); });
+  renderDatagenVariables();
+}
+function renderDatagenVariables() {
+  const list = $id('datagen-variable-list'); list.replaceChildren();
+  datagenVariables.forEach((row, index) => {
+    const tr = document.createElement('tr'); tr.className='variable-row';
+    const name = document.createElement('input'); name.value=row.name; name.placeholder='For example: user_id';
+    const type = document.createElement('select'); Object.entries(datagenTypes).forEach(([key,label])=>{const o=new Option(label,key);type.add(o);}); type.value=row.type; type.addEventListener('change',()=>{row.type=type.value;row.args=[...(datagenDefaults[row.type]||[])];renderDatagenVariables();saveForm();});
+    const params=document.createElement('div'); params.className='parameter-grid';
+    (row.args||[]).forEach((value,i)=>{const input=document.createElement('input');input.value=value;input.placeholder=row.type==='rand'?(i?'Maximum value ':'Min'):row.type==='sample'?([' Source Table ',' Source Column ',' Sample % ',' Random expression'][i]||'Parameters '):'Parameters ';input.addEventListener('input',()=>{row.args[i]=input.value;saveForm();});params.append(input);});
+    const ops=document.createElement('td'); ops.className='variable-ops';
+    const insert=document.createElement('button');insert.type='button';insert.className='secondary';insert.textContent='Insert Placeholder';insert.disabled=!row.name.trim();
+    name.addEventListener('input',()=>{row.name=name.value;insert.disabled=!row.name.trim();saveForm();});
+    insert.addEventListener('click',(event)=>{event.preventDefault();event.stopPropagation();try{datagenExpression(row);if(!datagenEditor || !datagenEditor.isConnected)throw Error(' Please place the cursor in the SQL edit box first ');datagenEditor.setRangeText(`\u007b\u007bvar('${row.name}')\u007d\u007d`,datagenSelection[0],datagenSelection[1],'end');datagenEditor.dispatchEvent(new Event('input',{bubbles:true}));datagenEditor.focus();datagenSelection=[datagenEditor.selectionStart,datagenEditor.selectionEnd];}catch(e){$id('submit-result').textContent='✗ '+e.message;$id('submit-result').className='hint err';}});
+    const remove=document.createElement('button');remove.type='button';remove.className='secondary danger-link';remove.textContent='Delete ';remove.addEventListener('click',(event)=>{event.preventDefault();event.stopPropagation();datagenVariables.splice(index,1);renderDatagenVariables();saveForm();});ops.append(insert,remove);
+    const c1=document.createElement('td');c1.append(name);const c2=document.createElement('td');c2.append(type);const c3=document.createElement('td');c3.append(params);tr.append(c1,c2,c3,ops);list.append(tr);
+  });
+}
+function activeMode() {
+  const tab = document.querySelector('.tab[data-mode].active');
+  return tab ? tab.dataset.mode : (INITIAL_MODE || 'form');
+}
+function connMode() { return document.querySelector('.seg-btn[data-conn-mode].active').dataset.connMode; }
+function switchConnMode(mode) {
+  document.querySelectorAll('.seg-btn[data-conn-mode]').forEach(b => {
+    b.classList.toggle('active', b.dataset.connMode === mode);
+  });
+  $id('conn-saved').style.display = mode === 'saved' ? '' : 'none';
+  $id('conn-temp').style.display = mode === 'temp' ? '' : 'none';
+  $id('form-table-options').replaceChildren();
+  formMetadata=null; formRules={}; formRulesValid=false;
+  saveForm();
+}
+document.querySelectorAll('.seg-btn[data-conn-mode]').forEach(b => {
+  b.addEventListener('click', () => switchConnMode(b.dataset.connMode));
+});
+
+function saveForm() {
+  try {
+    const payload = {
+      name: $id('f-name').value, mode: activeMode(), row_count: +$id('f-row-count').value || 1,
+      sql: $id('f-sql').value, script: $id('f-script').value,
+      multi_sql: $id('f-multi-sql').value,
+      multi_concurrency: +$id('f-multi-concurrency').value || 4,
+      variables: datagenVariableText(),
+      target_table: $id('f-target-table').value,
+    };
+    if (connMode() === 'saved') {
+      payload.connection_id = $id('f-connection-id').value;
+    } else {
+      const d = dsn();
+      payload.dsn = {host: d.host, port: d.port, user: d.user, database: d.database};
+    }
+    localStorage.setItem(LS_KEY, JSON.stringify(payload));
+  } catch (e) {}
+}
+function loadForm() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (!saved) return;
+    if (saved.name) $id('f-name').value = saved.name;
+    if (saved.dsn) {
+      $id('f-host').value = saved.dsn.host ?? $id('f-host').value;
+      $id('f-port').value = saved.dsn.port ?? $id('f-port').value;
+      $id('f-user').value = saved.dsn.user ?? $id('f-user').value;
+      $id('f-database').value = saved.dsn.database ?? $id('f-database').value;
+    }
+    if (saved.sql) $id('f-sql').value = saved.sql;
+    if (saved.multi_sql) $id('f-multi-sql').value = saved.multi_sql;
+    if (saved.multi_concurrency) $id('f-multi-concurrency').value = saved.multi_concurrency;
+    if (saved.row_count) $id('f-row-count').value = saved.row_count;
+    if (saved.variables) loadDatagenVariables(saved.variables);
+    if (saved.target_table) $id('f-target-table').value = saved.target_table;
+    if (saved.script) $id('f-script').value = saved.script;
+    if (!INITIAL_MODE && saved.mode && document.querySelector('.tab[data-mode="' + saved.mode + '"]')) {
+      // Rehabilitate only those patterns where the corresponding labels still exist:multi Moved to a standalone page, which will skip automatically
+      switchMode(saved.mode);
+    }
+    if (saved.connection_id) {
+      const select = $id('f-connection-id');
+      if ([...select.options].some(o => o.value === saved.connection_id)) {
+        select.value = saved.connection_id;
+        switchConnMode('saved');
+      }
+    }
+  } catch (e) {}
+}
+function switchMode(mode) {
+  document.querySelectorAll('.tab[data-mode]').forEach(t => t.classList.remove('active'));
+  const tab = document.querySelector('.tab[data-mode="' + mode + '"]');
+  if (tab) tab.classList.add('active');
+  $id('panel-sql').style.display = mode === 'sql' ? '' : 'none';
+  $id('panel-form').style.display = mode === 'form' ? '' : 'none';
+  $id('panel-multi').style.display = mode === 'multi' ? '' : 'none';
+  $id('panel-shell').style.display = mode === 'shell' ? '' : 'none';
+  if (mode === 'form') loadFormTableOptions($id('f-form-table').value.trim());
+  saveForm();
+}
+document.querySelectorAll('.tab[data-mode]').forEach(t => t.addEventListener('click', () => switchMode(t.dataset.mode)));
+['f-name','f-connection-id','f-host','f-port','f-user','f-password','f-database','f-sql','f-script','f-row-count','f-multi-concurrency','f-multi-row-count']
+  .forEach(id => $id(id).addEventListener('change', saveForm));
+$id('f-target-table').addEventListener('change', saveForm);
+$id('f-sql').addEventListener('input', saveForm);
+$id('f-multi-sql').addEventListener('input', saveForm);
+datagenRememberEditor($id('f-sql'));
+$id('f-script').addEventListener('input', saveForm);
+$id('btn-add-datagen-variable').addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); datagenVariables.push({id:clientId(),name:'',type:'rand',args:['1','10000']}); renderDatagenVariables(); saveForm(); });
+
+async function readFile(input, target, maxChars) {
+  const file = input.files[0];
+  if (!file) return;
+  const text = await file.text();
+  if (text.length > maxChars) {
+    $id('submit-result').textContent = '✗  File More ' + maxChars + ' Character Limit';
+    $id('submit-result').className = 'hint err';
+    return;
+  }
+  $id(target).value = text;
+  saveForm();
+}
+$id('f-sql-file').addEventListener('change', e => readFile(e.target, 'f-sql', maxSqlChars));
+$id('f-script-file').addEventListener('change', e => readFile(e.target, 'f-script', maxScriptChars));
+$id('f-multi-file').addEventListener('change', async (e) => {
+  await readFile(e.target, 'f-multi-sql', maxSqlChars);
+  if (e.target.files.length) await analyzeMulti();
+});
+
+async function analyzeMulti() {
+  const hint = $id('multi-analysis'), body = $id('multi-preview-body');
+  const content = $id('f-multi-sql').value.trim();
+  if (!content) {
+    hint.textContent = '✗  Paste or upload, please. SQL'; hint.className = 'hint err';
+    $id('multi-preview').style.display = 'none'; return;
+  }
+  hint.textContent = ' Parsing...'; hint.className = 'hint';
+  try {
+    const resp = await fetch('/api/datagen/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
+    const data = await resp.json();
+    if (!resp.ok) throw Error(sqlPulseUiText(data.detail) || ' Parsing failed');
+    body.replaceChildren();
+    data.groups.forEach(group => {
+      const tr = document.createElement('tr');
+      [group.table, group.statements].forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); });
+      body.append(tr);
+    });
+    if (data.global_statements) {
+      const tr = document.createElement('tr');
+      ['Unable to identify target list (serial first)', data.global_statements].forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); });
+      body.append(tr);
+    }
+    $id('multi-preview').style.display = (data.groups.length || data.global_statements) ? '' : 'none';
+    hint.textContent = '✓  Total  ' + data.total_statements + '  Statements, recognize  ' + data.groups.length + ' Watch.'
+      + (data.global_statements ? ',  There’s something else.  ' + data.global_statements + '  I can’t identify a target list. ' : '');
+    hint.className = 'hint ok';
+  } catch (err) {
+    hint.textContent = '✗ ' + err.message; hint.className = 'hint err';
+    $id('multi-preview').style.display = 'none';
+  }
+}
+$id('btn-analyze-multi').addEventListener('click', analyzeMulti);
+
+$id('btn-example-sql').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/datagen.sql');
+  $id('f-sql').value = await resp.text();
+  saveForm();
+});
+$id('btn-example-shell').addEventListener('click', async () => {
+  const resp = await fetch('/static/examples/datagen_shell.sh');
+  $id('f-script').value = await resp.text();
+  saveForm();
+});
+
+async function readDatagenResponse(resp) {
+  const text = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    if (!resp.ok) throw Error(' Request failed (%1) (HTTP ' + resp.status + '),  The service has not returned to JSON, please check the service log.');
+    throw Error(' Service response format error: expected JSON. ');
+  }
+  return data;
+}
+function datagenErrorMessage(detail, fallback=' Request failed ') {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map(item => {
+    if (typeof item === 'string') return item;
+    if (item && typeof item === 'object') {
+      const loc = Array.isArray(item.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
+      return [loc, sqlPulseUiText(item.msg || item.message) || JSON.stringify(item)].filter(Boolean).join(': ');
+    }
+    return String(item);
+  }).join('; ');
+  if (detail && typeof detail === 'object') return sqlPulseUiText(detail.message || detail.msg) || JSON.stringify(detail);
+  return fallback;
+}
+
+async function testConn(url, options, resultId) {
+  const r = $id(resultId);
+  r.textContent = 'Testing ...'; r.className = 'hint';
+  try {
+    const resp = await fetch(url, options);
+    const data = await readDatagenResponse(resp);
+    if (data.ok) { r.textContent = '✓  Connection successful '; r.className = 'hint ok'; }
+    else { r.textContent = '✗ ' + (sqlPulseUiText(data.error) || 'Connection failed '); r.className = 'hint err'; }
+  } catch (err) {
+    r.textContent = '✗ ' + err; r.className = 'hint err';
+  }
+}
+$id('btn-test-saved').addEventListener('click', () => {
+  const id = $id('f-connection-id').value;
+  if (!id) {
+    const r = $id('db-test-result');
+    r.textContent = '✗ Please select a saved connection first'; r.className = 'hint err'; return;
+  }
+  testConn('/api/connections/' + id + '/test', {method: 'POST'}, 'db-test-result');
+});
+$id('btn-test-db').addEventListener('click', () => {
+  testConn('/api/connections/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dsn())}, 'db-test-result-temp');
+});
+
+function datagenConnectionBody() {
+  if (connMode() === 'saved') return {connection_id: $id('f-connection-id').value || null};
+  return {db_dsn: dsn()};
+}
+let formTableLoadTimer = null;
+let dependencyPlan = null;
+async function loadFormTableOptions(query='') {
+  const list=$id('form-table-options');
+  try {
+    const body={...datagenConnectionBody(),query};
+    if(!body.connection_id && !body.db_dsn) return;
+    const resp=await fetch('/api/datagen/tables',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await readDatagenResponse(resp); if(!resp.ok) throw Error(sqlPulseUiText(data.detail)||' Failed to read Data Sheet ');
+    list.replaceChildren(...data.tables.map(name=>{const option=document.createElement('option');option.value=name;return option;}));
+  } catch(e) {
+    list.replaceChildren();
+    const hint=$id('form-metadata-result');hint.textContent='✗ '+e.message;hint.className='hint err';
+  }
+}
+$id('f-form-table').addEventListener('focus',()=>loadFormTableOptions($id('f-form-table').value.trim()));
+$id('f-form-table').addEventListener('input',()=>{clearTimeout(formTableLoadTimer);formTableLoadTimer=setTimeout(()=>loadFormTableOptions($id('f-form-table').value.trim()),250);});
+$id('f-connection-id').addEventListener('change',()=>{formMetadata=null;formRules={};formRulesValid=false;$id('form-table-options').replaceChildren();if(activeMode()==='form')loadFormTableOptions();});
+function renderMetadata(metadata, errors) {
+  datagenMetadata = metadata;
+  const list = $id('metadata-field-list');
+  list.replaceChildren();
+  (metadata.columns || []).forEach(col => {
+    const tr = document.createElement('tr');
+    const limit = [col.column_type, col.max_length ? ' Length ≤' + col.max_length : '', col.numeric_precision ? ` Precision  ${col.numeric_precision}/${col.numeric_scale ?? 0}` : '', col.default !== null ? 'Default value ' : '', col.extra || ''].filter(Boolean).join(' · ');
+    const unique = col.key === 'PRI' ? ' Primary Key' : (col.key === 'UNI' ? 'Unique ' : '-');
+    const source = col.sensitive ? ' Sensitivity column, need to be clearly identified ' : ' Database metadata ';
+    [col.name, limit, unique, col.nullable ? 'Allow ' : 'NOT NULL', source].forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); });
+    list.append(tr);
+  });
+  if (errors && errors.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5; td.className = 'field-error';
+    td.textContent = errors.map(e => `${e.column || '-'}: ${sqlPulseUiText(e.message)}`).join('\n');
+    tr.append(td); list.prepend(tr);
+  }
+}
+async function refreshMetadata(validateOnly=false) {
+  const hint = $id('metadata-result');
+  const table = $id('f-target-table').value.trim();
+  if (!table) { hint.textContent = '✗  Please fill out the target list. '; hint.className = 'hint err'; return; }
+  const body = {...datagenConnectionBody(), table};
+  if (!body.connection_id && !body.db_dsn) { hint.textContent = '✗ Please select a database connection first '; hint.className = 'hint err'; return; }
+  hint.textContent = validateOnly ? ' Validation...' : 'Reading...'; hint.className = 'hint';
+  try {
+    let url = '/api/datagen/metadata';
+    if (validateOnly) {
+      url = '/api/datagen/rules/validate';
+      body.row_count = +$id('f-row-count').value || 1;
+      body.rules = (datagenMetadata?.columns || []).map(col => ({column: col.name, nullable: col.nullable, unique: col.key === 'PRI' || col.key === 'UNI', length: {max: col.max_length}}));
+    }
+    const resp = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const data = await readDatagenResponse(resp);
+    if (!resp.ok) throw Error(sqlPulseUiText(data.detail) || ' Request failed');
+    renderMetadata(validateOnly ? data.metadata : data, validateOnly ? data.errors : []);
+    if (!validateOnly) await refreshDependencyPlan();
+    hint.textContent = validateOnly && data.errors.length ? `✗ ${data.errors.length} It’s a rule question. ` : '✓  Database limitations applied ';
+    hint.className = validateOnly && data.errors.length ? 'hint err' : 'hint ok';
+  } catch (err) {
+    hint.textContent = '✗ ' + err.message; hint.className = 'hint err';
+  }
+}
+$id('f-dependency-strategy').addEventListener('change', refreshDependencyPlan);
+async function refreshDependencyPlan() {
+  const table = $id('f-form-table').value.trim();
+  const hint = $id('dependency-plan-result');
+  if (!table) return;
+  hint.textContent = ' Reliance analysis ...'; hint.className = 'hint';
+  try {
+    const body = {...datagenConnectionBody(), table, target_rows:+$id('f-form-row-count').value || 1, strategy:$id('f-dependency-strategy').value};
+    const resp = await fetch('/api/datagen/dependency-plan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const data = await readDatagenResponse(resp); if (!resp.ok) throw Error(sqlPulseUiText(data.detail) || ' Failed to rely on analysis ');
+    dependencyPlan = data;
+    const deps = (data.dependencies || []).map(item => `${item.table}:  current  ${item.current_rows}, Recommendation for completion  ${item.planned_rows}  Article(s) (${sqlPulseUiText(item.reason)})`).join('\n');
+    const spaces = (data.unique_spaces || []).map(item => `${item.index}(${item.columns.join(' + ')}): Theory ${item.total_space}, occupied ${item.occupied_space},  Remaining  ${item.available_space},  Objective ${item.required_rows}`).join('\n');
+    hint.textContent = [deps ? 'Dependency table:\n' + deps : ' No dependency table found ', spaces ? ' Unique group: \n' + spaces : '', (data.warnings || []).map(sqlPulseUiText).join('\n')].filter(Boolean).join('\n');
+    hint.className = data.warnings?.length ? 'hint err' : 'hint ok';
+  } catch (err) { dependencyPlan = null; hint.textContent = '✗ ' + err.message; hint.className = 'hint err'; }
+}
+$id('f-form-row-count').addEventListener('change', () => { if ($id('f-form-table').value.trim()) refreshDependencyPlan(); });
+$id('btn-refresh-metadata').addEventListener('click', () => refreshMetadata(false));
+$id('btn-validate-rules').addEventListener('click', () => refreshMetadata(true));
+
+function defaultFormRule(col) {
+  const type=String(col.data_type || col.column_type || '').toLowerCase();
+  let generator='randstr', params={max_length:Math.min(Number(col.max_length)||16,255)};
+  if(col.enum_values?.length) { generator='pick'; params={values:[...col.enum_values]}; }
+  else if(/tinyint|smallint|mediumint|\bint\b|integer|bigint/.test(type)) { generator='rand'; params={min:1,max:100000}; }
+  else if(/decimal|numeric|float|double/.test(type)) { generator='randf'; params={min:0,max:1000,digits:Number(col.numeric_scale)||2}; }
+  else if(/datetime|timestamp/.test(type)) { generator='randdt'; params={start:'2026-01-01 00:00:00',end:'2026-12-31 23:59:59'}; }
+  else if(/^date$/.test(type)) { generator='randdate'; params={start:'2026-01-01',end:'2026-12-31'}; }
+  if(/auto_increment|generated/i.test(col.extra || '') || (col.default !== null && col.default !== undefined)) generator='omit';
+  return {column:col.name,generator,params,null_ratio:0,sample_ratio:100,status:'unapplied'};
+}
+function formParamInputs(rule, rerender) {
+  const box=document.createElement('div'); box.className='parameter-grid'; const p=rule.params || (rule.params={});
+  const add=(key,label,type='text')=>{const input=document.createElement('input');input.type=type;input.placeholder=label;input.value=Array.isArray(p[key])?p[key].join(','):p[key]??'';input.addEventListener('input',()=>{p[key]=Array.isArray(p[key])?input.value.split(',').map(x=>x.trim()).filter(Boolean):input.value;rule.status='unapplied';formRulesValid=false;});box.append(input);};
+  const base=rule.generator==='sample'?(rule.base_generator||'rand'):rule.generator;
+  if(base==='rand'){add('min','Min','number');add('max',' Maximum value ','number');}
+  else if(base==='randf'){add('min',' Min','number');add('max',' Maximum value','number');add('digits','Decimal places ','number');}
+  else if(base==='randstr') add('max_length',' Maximum length ','number');
+  else if(base==='pick') add('values','Candidates, comma-separated ');
+  else if(base==='randdate'||base==='randdt'){add('start','Action. ');add('end',' End ');}
+  else if(base==='derived'){const input=document.createElement('input');input.value=rule.derived_expression||'';input.readOnly=true;input.title='By Database CHECK  Constraint calculation';box.append(input);}
+  return box;
+}
+function renderFormFields(metadata, keepRules=false) {
+  formMetadata=metadata; const list=$id('form-field-list'); list.replaceChildren();
+  const foreignColumns=new Set((metadata.foreign_keys||[]).map(fk=>fk.COLUMN_NAME));
+  const uniqueColumns=new Set((metadata.unique_indexes||[]).filter(index=>index.columns?.length===1).map(index=>index.columns[0]).filter(column=>!foreignColumns.has(column)));
+  (metadata.columns||[]).forEach(col=>{
+    const existing=keepRules&&formRules[col.name]; const rule=existing||defaultFormRule(col); formRules[col.name]=rule;
+    const tr=document.createElement('tr');
+    const mode=document.createElement('select');
+    [['rand',' Random integer number '],['randf',' Random decimal '],['randstr',' Random string'],['pick','Enumeration '],['randdate',' Random date '],['randdt',' Random date time '],['sample','Sample of data available'],['derived',' Database calculation rules '],['omit',' Skip ']].forEach(([v,t])=>{const option=new Option(t,v);if(v==='sample'&&(uniqueColumns.has(col.name)||col.key==='PRI'||col.key==='UNI')){option.disabled=true;option.textContent=' Sample of available data (single field not available)';}if(v==='derived')option.disabled=rule.generator!=='derived';mode.add(option);});
+  mode.value=rule.generator; mode.addEventListener('change',()=>{const previous=rule.generator;rule.generator=mode.value;if(mode.value==='sample'){rule.base_generator=previous==='sample'?(rule.base_generator||'rand'):previous;}rule.status='unapplied';formRulesValid=false;renderFormFields(formMetadata,true);});
+    const ratio=document.createElement('input');ratio.type='number';ratio.min=0;ratio.max=100;ratio.value=rule.sample_ratio??100;ratio.disabled=rule.generator!=='sample';ratio.addEventListener('input',()=>{rule.sample_ratio=Number(ratio.value);rule.status='unapplied';formRulesValid=false;});
+    const status=document.createElement('span');status.className=rule.status==='adjusted'?'badge badge-running':'hint';status.textContent={adjusted:' Adjusted',passed:' It’s passed. ',unapplied:' Not applied '}[rule.status]||rule.status;
+    const values=[col.name,[col.column_type,col.max_length?' Length≤'+col.max_length:'',col.nullable?' Empty ':'NOT NULL'].filter(Boolean).join(' · ')];values.forEach(text=>{const td=document.createElement('td');td.textContent=text;tr.append(td);});
+    const modeCell=document.createElement('td');modeCell.append(mode);const paramsCell=document.createElement('td');paramsCell.append(formParamInputs(rule));const ratioCell=document.createElement('td');ratioCell.append(ratio);const statusCell=document.createElement('td');statusCell.append(status);tr.append(modeCell,paramsCell,ratioCell,statusCell);list.append(tr);
+  });
+}
+async function loadFormTable() {
+  const hint=$id('form-metadata-result'), table=$id('f-form-table').value.trim();
+  if (!table) { hint.textContent='✗  Please fill out the target list. '; hint.className='hint err'; return; }
+  hint.textContent=' Reading...';
+  try {
+    const resp=await fetch('/api/datagen/metadata',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...datagenConnectionBody(),table})});
+    const data=await readDatagenResponse(resp); if(!resp.ok) throw Error(sqlPulseUiText(data.detail) || ' Could not read data');
+    formRules={}; formRulesValid=false; renderFormFields(data); $id('btn-apply-form-rules').disabled=false; hint.textContent=`✓ Read ${data.columns.length}  field, apply database rules once configured`; hint.className='hint ok';
+  } catch(e) { hint.textContent='✗ '+e.message; hint.className='hint err'; }
+}
+async function applyFormRules() {
+  const hint=$id('form-metadata-result'), table=$id('f-form-table').value.trim(); hint.textContent=' Database rules are being applied ...';hint.className='hint';
+  try {
+    const body={...datagenConnectionBody(),table,row_count:+$id('f-form-row-count').value||1,rules:Object.values(formRules)};
+    const resp=await fetch('/api/datagen/rules/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await readDatagenResponse(resp);if(!resp.ok)throw Error(sqlPulseUiText(data.detail)||' Could not apply changes ');
+    formRules=Object.fromEntries(data.rules.map(rule=>[rule.column,rule]));formRulesValid=data.ok;renderFormFields(data.metadata,true);
+    const summary=data.changes.map(x=>`${x.column}: ${JSON.stringify(x.before)} → ${JSON.stringify(x.after)} (${sqlPulseUiText(x.reason)})`).join('; ');
+    hint.textContent=(data.ok?'✓ ':'✗ ')+` Adjustment ${data.changes.length}  Item`+(summary?': '+summary:'')+(data.errors.length?';  Error: '+data.errors.map(x=>x.column+' '+sqlPulseUiText(x.message)).join('; '):'');hint.className=data.ok?'hint ok':'hint err';
+  } catch(e){hint.textContent='✗ '+e.message;hint.className='hint err';}
+}
+async function submitAiDatagen() {
+  const button=$id('btn-ai-datagen'), result=$id('submit-result');
+  const table=$id('f-form-table').value.trim(), row_count=+$id('f-form-row-count').value||1;
+  if(activeMode()!=='form'){result.textContent='✗ AI Numeric numbers only apply to single-form modes ';result.className='hint err';return;}
+  if(!formMetadata || !formRulesValid){result.textContent='✗  Read the table structure and apply the adopted database rules first';result.className='hint err';return;}
+  button.disabled=true;$id('btn-submit').disabled=true;result.textContent='AI Generating SQL and creating numbering jobs... ';result.className='hint';
+  try {
+    const conn=datagenConnectionBody();if(conn.connection_id===null)throw Error(' Please select a database connection first');
+    const dependency_strategy=$id('f-dependency-strategy').value;
+    const dependency_plan=dependencyPlan||{};
+    const confirm_dependency_writes=$id('f-confirm-dependency-writes').checked;
+    if(dependency_strategy!=='target_only'&&(dependency_plan.dependencies||[]).some(item=>item.planned_rows>0)&&!confirm_dependency_writes)throw Error(' Please confirm that you are allowed to write to a dependent table. ');
+    const resp=await fetch('/api/datagen/ai/generate-sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...conn,name:$id('f-name').value.trim(),table,row_count,rules:Object.values(formRules),dependency_strategy,dependency_plan,confirm_dependency_writes})});
+    const data=await readDatagenResponse(resp);if(!resp.ok)throw Error(datagenErrorMessage(data.detail,'Failed to generate'));
+    result.textContent=`✓ AI Generated and started to make (%2) (${data.statement_count}  SQL, mission  ${data.job_id}`;result.className='hint ok';setTimeout(()=>location.reload(),1200);
+  } catch(e) { result.textContent='✗ '+e.message;result.className='hint err'; }
+  finally { button.disabled=false;$id('btn-submit').disabled=false; }
+}
+$id('btn-ai-datagen').addEventListener('click',submitAiDatagen);
+function formRuleExpression(rule,col) {
+  const p=rule.params||{}; let base=rule.generator==='sample'?(rule.base_generator||defaultFormRule(col).generator):rule.generator;
+  let expr;
+  if(base==='rand') expr=`rand(${Number(p.min)},${Number(p.max)})`;
+  else if(base==='randf') expr=`randf(${Number(p.min)},${Number(p.max)},${Number(p.digits)})`;
+  else if(base==='randstr') expr=`randstr(${Number(p.max_length)})`;
+  else if(base==='pick') expr=`pick(${(p.values||[]).map(datagenLiteral).join(',')})`;
+  else if(base==='randdate'||base==='randdt') expr=`${base}(${datagenLiteral(p.start)},${datagenLiteral(p.end)})`;
+  else throw Error(`${col.name} No generation rules available `);
+  if(rule.generator!=='sample') return expr;
+  const source=rule.sample_source||{table:formMetadata.table,column:col.name};return `sample(${datagenLiteral(source.table)},${datagenLiteral(source.column)},{'sample_ratio':${Number(rule.sample_ratio)},'random':${datagenLiteral(expr)}})`;
+}
+function buildFormSql() {
+  if (!formMetadata) throw Error('Read the target list structure first.');
+  if (!formRulesValid) throw Error(' Database rules have not yet been adopted. Please apply the rules and process errors before submitting them ');
+  const pending=Object.values(formRules).filter(rule=>rule.status==='unapplied');
+  if(pending.length) throw Error(' Please click first. “ Apply Database Rules ” Update and confirm field rules ');
+  const table=$id('f-form-table').value.trim(), columns=[], values=[]; formVariables={};
+  const columnsByName=Object.fromEntries((formMetadata.columns||[]).map(col=>[col.name,col]));
+  const placeholder=name=>'\u007b\u007bvar('+datagenLiteral(name)+')\u007d\u007d';
+  const variableName=column=>'_f_'+column;
+  (formMetadata.columns || []).forEach(col => {
+    if (/auto_increment|generated/i.test(col.extra || '') || (col.default !== null && col.default !== undefined && col.default !== '')) return;
+    const rule=formRules[col.name]||defaultFormRule(col); if(rule.generator==='omit') return;
+    columns.push('`'+col.name+'`');
+    if(rule.generator!=='derived') {
+      const name=variableName(col.name);formVariables[name]=formRuleExpression(rule,col);values.push(placeholder(name));return;
+    }
+    let expression=rule.derived_expression||'';
+    (rule.dependencies||[]).forEach(dependency=>{
+      const dependencyRule=formRules[dependency];const dependencyColumn=columnsByName[dependency];let replacement;
+      if(dependencyRule&&dependencyRule.generator!=='omit') {
+        const name=variableName(dependency);if(!formVariables[name])formVariables[name]=formRuleExpression(dependencyRule,dependencyColumn);replacement=placeholder(name);
+      } else if(dependencyColumn&&dependencyColumn.default!==null&&dependencyColumn.default!==undefined) {
+        replacement=Number.isFinite(Number(dependencyColumn.default))?String(dependencyColumn.default):datagenLiteral(dependencyColumn.default);
+      } else throw Error(`${col.name}  _Other Organiser ${dependency} No rules or defaults generated `);
+      expression=expression.replace(new RegExp('\\b'+dependency+'\\b','g'),replacement);
+    });
+    values.push('('+expression+')');
+  });
+  if(!columns.length) throw Error(' Select at least one field');
+  return 'INSERT INTO `' + table + '` (' + columns.join(', ') + ') VALUES (' + values.join(', ') + ');';
+}
+$id('btn-load-form-table').addEventListener('click', loadFormTable);
+$id('btn-apply-form-rules').addEventListener('click', applyFormRules);
+
+$id('datagen-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const hint = $id('submit-result');
+  const mode = activeMode();
+  let content = mode === 'sql' ? $id('f-sql').value.trim()
+              : mode === 'multi' ? $id('f-multi-sql').value.trim()
+              : mode === 'form' ? '' : $id('f-script').value.trim();
+  if (mode === 'form') { try { content = buildFormSql(); } catch (err) { hint.textContent='✗ '+err.message; hint.className='hint err'; return; } }
+  if (!content) {
+    hint.textContent = '✗  Make content empty '; hint.className = 'hint err'; return;
+  }
+  if (mode === 'shell' && !scriptEnabled) {
+    hint.textContent = '✗ Shell  Number of switches not opened '; hint.className = 'hint err'; return;
+  }
+  if (mode === 'shell' && !confirm('Shell  Scripts will be executed on the side of the target by a sub-process to confirm continuation? ')) return;
+  const body = {
+    name: $id('f-name').value, mode: mode === 'form' ? 'sql' : mode, source: 'paste',
+    content: content,
+    row_count: mode === 'sql' ? (+$id('f-row-count').value || 1)
+              : mode === 'form' ? (+$id('f-form-row-count').value || 1)
+              : mode === 'multi' ? (+$id('f-multi-row-count').value || 1) : 1,
+  };
+  if (mode === 'multi') body.concurrency = +$id('f-multi-concurrency').value || 4;
+  if (mode === 'form') {
+    body.target_table = $id('f-form-table').value.trim();
+    body.field_rules = Object.values(formRules);
+    body.variables = formVariables;
+    body.dependency_strategy = $id('f-dependency-strategy').value;
+    body.dependency_plan = dependencyPlan || {};
+    body.confirm_dependency_writes = $id('f-confirm-dependency-writes').checked;
+    if (body.dependency_strategy !== 'target_only' && (dependencyPlan?.dependencies || []).some(item => item.planned_rows > 0) && !body.confirm_dependency_writes) {
+      hint.textContent = '✗  Please confirm that you are allowed to write to a dependent table.'; hint.className = 'hint err'; return;
+    }
+  }
+  if (mode === 'sql') {
+    try { body.variables = datagenVariableText(); }
+    catch (err) { hint.textContent = '✗ ' + err.message; hint.className = 'hint err'; return; }
+  } else if (mode !== 'form') {
+    body.variables = {};
+  }
+  if (connMode() === 'saved') {
+    const connectionId = $id('f-connection-id').value;
+    if (!connectionId) {
+      hint.textContent = '✗  Please select a saved connection or switch to a temporary connection'; hint.className = 'hint err'; return;
+    }
+    body.connection_id = connectionId;
+  } else {
+    body.db_dsn = dsn();
+  }
+  saveForm();
+  $id('btn-submit').disabled = true; hint.textContent = 'Submitting ...'; hint.className = 'hint';
+  try {
+    const resp = await fetch('/api/datagen/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await readDatagenResponse(resp);
+    if (resp.ok) {
+      hint.textContent = '✓  _Other Organiser  ' + data.job_id;
+      hint.className = 'hint ok';
+      setTimeout(() => location.reload(), 1200);
+    } else {
+      hint.textContent = '✗ ' + (sqlPulseUiText(data.detail) || ' Submission failed '); hint.className = 'hint err';
+      $id('btn-submit').disabled = false;
+    }
+  } catch (err) {
+    hint.textContent = '✗ ' + err; hint.className = 'hint err'; $id('btn-submit').disabled = false;
+  }
+});
+
+document.querySelectorAll('.stop-job').forEach(a => a.addEventListener('click', async (e) => {
+  e.preventDefault();
+  await fetch('/api/datagen/jobs/' + a.dataset.id + '/stop', {method: 'POST'});
+  location.reload();
+}));
+
+renderDatagenVariables();
+loadForm();
+if (INITIAL_MODE) switchMode(INITIAL_MODE);
+</script>
+{% endblock %}

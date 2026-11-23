@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}Connections · SQL Pulse{% endblock %}
+{% block nav_connections %}class="active"{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Connections</h1>
+  <button type="button" id="btn-create" class="primary">New Connection</button>
+</div>
+<div id="conn-feedback" class="hint"></div>
+
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Address</th>
+        <th>User</th>
+        <th>Database</th>
+        <th>Password</th>
+        <th>Updated At</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for conn in connections %}
+      <tr data-id="{{ conn.id }}">
+        <td>{{ conn.name }}</td>
+        <td><code>{{ conn.host }}:{{ conn.port }}</code></td>
+        <td>{{ conn.user }}</td>
+        <td>{{ conn.database }}</td>
+        <td>{% if conn.has_password %}Set {% else %}<span class="muted"> Not set</span>{% endif %}</td>
+        <td>{{ conn.updated_at }}</td>
+        <td class="ops">
+          <a href="#" class="test-conn" data-id="{{ conn.id }}">Test</a>
+          <a href="#" class="edit-conn" data-id="{{ conn.id }}">Edit</a>
+          <a href="#" class="delete-conn danger-link" data-id="{{ conn.id }}">Delete</a>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No saved connections. Click New Connection to add one. </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div id="conn-modal" class="modal-mask" style="display:none">
+  <div class="modal">
+    <h3 id="modal-title">New Connection</h3>
+    <form id="conn-form">
+      <input type="hidden" id="c-id">
+      <div class="form-row">
+        <label>Name</label>
+        <input type="text" id="c-name" required maxlength="100" placeholder=" e.g., Orders Database / Staging ">
+      </div>
+      <div class="grid4">
+        <div><label>Host</label><input type="text" id="c-host" required maxlength="255"></div>
+        <div><label>Port</label><input type="number" id="c-port" min="1" max="65535"></div>
+        <div><label>User</label><input type="text" id="c-user" required maxlength="255"></div>
+        <div><label>Database</label><input type="text" id="c-database" required maxlength="255"></div>
+      </div>
+      <div class="form-row">
+        <label>Password</label>
+        <input type="password" id="c-password" maxlength="1024" placeholder="Leave blank to keep the current password">
+      </div>
+      <div id="conn-form-error" class="hint err"></div>
+      <div class="form-actions">
+        <button type="button" id="btn-cancel" class="secondary">Cancel</button>
+        <button type="submit" id="btn-save" class="primary">Save</button>
+        <button type="button" id="btn-save-test" class="secondary">Save and Test</button>
+        <span id="modal-feedback" class="hint"></span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+const CONNECTIONS = {{ connections|tojson }};
+const DEFAULT_DSN = {{ default_dsn|tojson }};
+const modal = document.getElementById('conn-modal');
+
+function feedback(text, ok) {
+  const el = document.getElementById('conn-feedback');
+  el.textContent = text;
+  el.className = ok ? 'hint ok' : 'hint err';
+}
+
+function openModal(conn) {
+  document.getElementById('modal-title').textContent = conn ? 'Edit Connection' : ' New Connection ';
+  document.getElementById('c-id').value = conn ? conn.id : '';
+  document.getElementById('c-name').value = conn ? conn.name : '';
+  document.getElementById('c-host').value = conn ? conn.host : DEFAULT_DSN.host;
+  document.getElementById('c-port').value = conn ? conn.port : DEFAULT_DSN.port;
+  document.getElementById('c-user').value = conn ? conn.user : DEFAULT_DSN.user;
+  document.getElementById('c-database').value = conn ? conn.database : DEFAULT_DSN.database;
+  document.getElementById('c-password').value = '';
+  document.getElementById('conn-form-error').textContent = '';
+  document.getElementById('modal-feedback').textContent = '';
+  modal.style.display = '';
+}
+
+function closeModal() {
+  modal.style.display = 'none';
+}
+
+function formPayload() {
+  return {
+    name: document.getElementById('c-name').value,
+    host: document.getElementById('c-host').value,
+    port: +document.getElementById('c-port').value,
+    user: document.getElementById('c-user').value,
+    password: document.getElementById('c-password').value,
+    database: document.getElementById('c-database').value,
+  };
+}
+
+async function saveConn(andTest) {
+  const id = document.getElementById('c-id').value;
+  const url = id ? '/api/connections/' + id : '/api/connections';
+  const method = id ? 'PUT' : 'POST';
+  const payload = formPayload();
+  const errEl = document.getElementById('conn-form-error');
+  const doneEl = document.getElementById('modal-feedback');
+  errEl.textContent = '';
+  doneEl.textContent = ' Saving...';
+  doneEl.className = 'hint';
+  try {
+    const resp = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = '✗ ' + (sqlPulseUiText(data.detail) || 'Could not save');
+      doneEl.textContent = '';
+      return;
+    }
+    if (andTest) {
+      const testResp = await fetch('/api/connections/' + data.id + '/test', {method: 'POST'});
+      const result = await testResp.json();
+      if (!result.ok) {
+        errEl.textContent = '✓ Saved, but test failed: ' + (sqlPulseUiText(result.error) || ' Unknown error ');
+        doneEl.textContent = '';
+        return;
+      }
+    }
+    doneEl.textContent = '✓ Saved ';
+    doneEl.className = 'hint ok';
+    setTimeout(() => location.reload(), 600);
+  } catch (err) {
+    errEl.textContent = '✗ ' + err;
+    doneEl.textContent = '';
+  }
+}
+
+document.getElementById('btn-create').addEventListener('click', () => openModal(null));
+document.getElementById('btn-cancel').addEventListener('click', closeModal);
+document.getElementById('btn-save').addEventListener('click', () => saveConn(false));
+document.getElementById('btn-save-test').addEventListener('click', () => saveConn(true));
+document.getElementById('conn-form').addEventListener('submit', e => {
+  e.preventDefault();
+  saveConn(false);
+});
+
+document.querySelectorAll('.edit-conn').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const conn = CONNECTIONS.find(c => c.id === a.dataset.id);
+    if (conn) openModal(conn);
+  });
+});
+
+document.querySelectorAll('.test-conn').forEach(a => {
+  a.addEventListener('click', async e => {
+    e.preventDefault();
+    feedback('Testing ...', false);
+    const resp = await fetch('/api/connections/' + a.dataset.id + '/test', {method: 'POST'});
+    const data = await resp.json();
+    feedback(data.ok ? '✓  Connection successful' : '✗ ' + (sqlPulseUiText(data.error) || ' Connection failed'), data.ok);
+  });
+});
+
+document.querySelectorAll('.delete-conn').forEach(a => {
+  a.addEventListener('click', async e => {
+    e.preventDefault();
+    if (!confirm(' Confirm that the connection is deleted? The DSN snapshot of the historical mission is unaffected. ')) return;
+    const resp = await fetch('/api/connections/' + a.dataset.id, {method: 'DELETE'});
+    const data = await resp.json();
+    if (resp.ok) {
+      feedback('✓ Deleted ', true);
+      setTimeout(() => location.reload(), 400);
+    } else {
+      feedback('✗ ' + (sqlPulseUiText(data.detail) || ' Failed to delete '), false);
+    }
+  });
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+});
+</script>
+{% endblock %}

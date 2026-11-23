@@ -1,0 +1,114 @@
+{# Web page「AI Diagnosis (L2)」Cards and htmx Snippets.
+   fragment_only=true Only the diagnostic area is rendered on time (htmx round of queries; otherwise rendering the whole card (report.html (Included).
+   Context: run_id、ai (Key State, job_view (Last job).
+   Key Management in「Profile」Pages; this card displays only status and jump links and does not provide forms.
+   Always display only the mask; model output by Jinja Default transposition, rendering in plain text. #}
+{% set run_id = run_id if run_id is defined else run.id %}
+
+{% macro key_area() %}
+<p>
+{% if ai.source == 'user' %}
+  Current key:<code>{{ ai.masked }}</code>
+  <span class="muted">{{ ai.provider_label|ui_text }} · Model {{ ai.model }} · Request {{ ai.base_url_host }} · Requests are billed to this key. </span>
+{% elif ai.source == 'server' %}
+  The server default key will be used  <code>{{ ai.masked }}</code>
+  <span class="muted">{{ ai.provider_label|ui_text }} · Model {{ ai.model }} · Request {{ ai.base_url_host }}</span>
+{% elif ai.source == 'broken' %}
+  <span class="err-msg">Cannot decrypt the saved key. APP_SECRET_KEY may have changed.</span>
+  <a href="/profile#ai-key">Update the key in Profile →</a>
+{% else %}
+  <span class="muted"> Add an API key in Profile to enable AI diagnosis. </span>
+  <a href="/profile#ai-key">Open Profile  →</a>
+{% endif %}
+</p>
+{% endmacro %}
+
+{% macro error_text(err) -%}
+{%- if err.code == 'LLM_AUTH_FAILED' -%}Model authentication failed (401). Check your API key and try again.
+{%- elif err.code == 'LLM_INSUFFICIENT_BALANCE' -%}Model returns 402: Insufficient account balance
+{%- elif err.code == 'LLM_RATE_LIMITED' -%}Model returns 429: Request frequency limited. Please try again later.
+{%- elif err.code in ('LLM_TIMEOUT', 'LLM_CONNECTION_ERROR') -%}Could not connect to model service. Check the network and try again
+{%- elif err.code == 'LLM_CONFIG_ERROR' -%}No available model key configured
+{%- elif err.code == 'KEY_UNDECRYPTABLE' -%}Cannot decrypt the saved key. Re-enter it in Profile.
+{%- elif err.code == 'PLATFORM_RESTARTED' -%}The re-launching of the platform has interrupted this diagnosis. Please start over.
+{%- else -%}{{ (err.message)|ui_text }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro diagnose_area() %}
+{% if job_view.status == 'none' %}
+  {% if ai.source == 'none' %}
+  <p class="muted">Add an API key before starting diagnosis. </p>
+  {% else %}
+  <button class="primary" hx-post="/api/runs/{{ run_id }}/ai/diagnose"
+          hx-target="#ai-diag-area" hx-swap="innerHTML">Start AI Diagnosis</button>
+  <p class="hint"> Collect metrics and execution plans for this test and send them to the model. This may take up to a minute; requests are billed to your API key.</p>
+  {% endif %}
+{% elif job_view.status in ('pending', 'running') %}
+  <div hx-get="/api/runs/{{ run_id }}/ai/diagnose/{{ job_view.job_id }}/fragment"
+       hx-trigger="every 2s" hx-target="#ai-diag-area" hx-swap="innerHTML">
+    <p>Diagnosis in progress… ({{ 'Queued' if job_view.status == 'pending' else 'Started' }},
+       {{ job_view.started_at or job_view.created_at }})</p>
+  </div>
+{% elif job_view.error %}
+  <div class="advice advice-error">
+    <strong> Diagnosis Failed</strong>
+    <p>{{ error_text(job_view.error) }}</p>
+  </div>
+  {% if ai.source != 'none' %}
+  <button class="primary" hx-post="/api/runs/{{ run_id }}/ai/diagnose"
+          hx-target="#ai-diag-area" hx-swap="innerHTML">Run Again</button>
+  {% endif %}
+{% else %}
+  {% set d = job_view.result.diagnosis %}
+  <div class="advice advice-info">
+    <strong>AI Diagnosis (L2) </strong>
+    <p>{{ d.summary }}</p>
+  </div>
+  {% for f in d.findings %}
+  <div class="advice {{ 'advice-error' if f.priority == 'high' else ('advice-warn' if f.priority == 'medium' else '') }}">
+    <strong>[{{ f.priority|upper }}] {{ f.title }}</strong>
+    <p>{{ f.observation }}</p>
+    <p class="muted">Hypothesis: {{ f.hypothesis }}<br>Evidence: {% for e in f.evidence_ids %}<code>{{ e }}</code> {% endfor %}</p>
+    <ul>
+      {% for s in f.next_steps %}<li>{{ s }}</li>{% endfor %}
+    </ul>
+    <p class="muted">Uncertainty: {{ f.uncertainty }}</p>
+  </div>
+  {% else %}
+  <p class="muted">The model reported no findings. </p>
+  {% endfor %}
+  {% if d.limitations %}
+  <details>
+    <summary>Limitations ({{ d.limitations|length }})</summary>
+    <ul>{% for x in d.limitations %}<li>{{ x }}</li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+  <p class="muted">
+    {% if job_view.result.model %}Model {{ job_view.result.model }} · {% endif %}
+    {% if job_view.result.usage %}token: Enter {{ job_view.result.usage.prompt_tokens }} / Output {{ job_view.result.usage.completion_tokens }} · {% endif %}
+    Token limit: {{ job_view.result.budget.max_tokens }} token
+    <br>{{ (job_view.result.validation)|ui_text }}
+  </p>
+  {% if job_view.warnings %}
+  <details>
+    <summary>Collection Warnings ({{ job_view.warnings|length }})</summary>
+    <ul>{% for w in job_view.warnings %}<li>{{ (w)|ui_text }}</li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+  <button class="primary" hx-post="/api/runs/{{ run_id }}/ai/diagnose"
+          hx-target="#ai-diag-area" hx-swap="innerHTML">Run Again</button>
+{% endif %}
+{% endmacro %}
+
+{% if fragment_only %}
+{{ diagnose_area() }}
+{% else %}
+<details class="card" id="ai-diagnose" open>
+  <summary>AI Diagnosis (L2) <span class="tag"> Model analysis · Billed per request</span></summary>
+  {{ key_area() }}
+  <div id="ai-diag-area" class="ai-diag-area">
+    {{ diagnose_area() }}
+  </div>
+</details>
+{% endif %}

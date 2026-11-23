@@ -14,7 +14,7 @@
   }
 
   function formatTime(ts) {
-    return new Date(Number(ts) * 1000).toLocaleTimeString('zh-CN', {hour12: false});
+    return new Date(Number(ts) * 1000).toLocaleTimeString(root.document?.documentElement.lang || 'zh-CN', {hour12: false});
   }
 
   root.SqlPulseTimeline = {upsert, formatTime};

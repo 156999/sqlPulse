@@ -241,7 +241,16 @@ def diagnose_run(run_id, *, client=None, tool_registry=None, dry_run=False,
                  for e in evidence)
     if not useful:
         return _failure(run_id, "INSUFFICIENT_EVIDENCE", "缺少可用指标和执行计划，暂不请求模型", warnings)
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": json.dumps({
+    from app.ui_language import is_english
+
+    system_prompt = SYSTEM
+    if is_english():
+        system_prompt = SYSTEM.replace(
+            "用中文回答，只输出",
+            "Write all human-readable diagnostic text in English. Keep JSON keys, evidence IDs and SQL unchanged. 只输出",
+            1,
+        )
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps({
         "run_id": run_id, "evidence": evidence, "collection_warnings": warnings,
         "tool_status": states, "output_schema": Diagnosis.model_json_schema(),
     }, ensure_ascii=False, allow_nan=False)}]

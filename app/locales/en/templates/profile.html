@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Profile · SQL Pulse{% endblock %}
+{% block nav_profile %}class="active"{% endblock %}
+{% block content %}
+<h1>Profile</h1>
+
+<div class="card">
+  <h3>Account Information</h3>
+  <table class="table">
+    <tr><th>Username</th><td>{{ user.username if user else 'Anonymous' }}</td></tr>
+    <tr><th>User ID</th><td><code>{{ user.id if user else 'Anonymous' }}</code></td></tr>
+  </table>
+</div>
+
+<div class="card" id="ai-key">
+  <h3>AI Model</h3>
+  <p>
+    In use: <strong>{{ ai.provider_label|ui_text }}</strong> · <code>{{ ai.model }}</code>
+    {% if ai.source == 'user' %} (Key  <code>{{ ai.masked }}</code>){% endif %}
+    {% if ai.source == 'server' %} (Server Default Key  <code>{{ ai.masked }}</code>){% endif %}
+    {% if ai.source == 'broken' %} (<span class="err-msg">The key could not be decrypted </span>){% endif %}
+    {% if ai.source == 'none' %} (<span class="muted"> No key configured</span>){% endif %}
+    <span class="muted">· Endpoint: {{ ai.base_url_host }} · Requests are billed to this key. </span>
+  </p>
+  {% if ai_key_error %}<p class="err-msg">{{ (ai_key_error)|ui_text }}</p>{% endif %}
+  <form method="post" action="/api/ai/key" class="ai-key-form">
+    <select name="model" aria-label=" Vendors and models ">
+      {% for p in ai.providers %}
+      <optgroup label="{{ p.label|ui_text }}">
+        {% for m in p.models %}
+        <option value="{{ p.key }}|{{ m }}" {% if p.key == ai.provider and m == ai.model %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </optgroup>
+      {% endfor %}
+    </select>
+    <input type="password" name="api_key" autocomplete="new-password" maxlength="1024"
+           placeholder="{{ 'sk-… (leave blank to change only the model)' if ai.source in ('user', 'server') else 'sk-… (paste your provider API key)' }}">
+    <button class="primary">Save</button>
+  </form>
+
+  <table class="table">
+    <thead><tr><th>Vendor</th><th>Key</th><th></th></tr></thead>
+    <tbody>
+      {% for p in ai.providers %}
+      <tr>
+        <td>{{ p.label|ui_text }}</td>
+        <td>
+          {% if p.source == 'user' %}Configured  <code>{{ p.masked }}</code>
+          {% elif p.source == 'server' %}Server Default  <code>{{ p.masked }}</code>
+          {% elif p.source == 'broken' %}<span class="err-msg">Cannot decrypt key </span>
+          {% else %}<span class="muted"> Unconfigured</span>{% endif %}
+        </td>
+        <td>
+          {% if p.source in ('user', 'broken') %}
+          <form method="post" action="/api/ai/key/delete" class="ai-key-inline"
+                onsubmit="return confirm('Delete the key for {{ p.label|ui_text }}? AI diagnosis for this provider will be disabled.');">
+            <input type="hidden" name="provider" value="{{ p.key }}">
+            <button>Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">
+    Keys are encrypted with Fernet and displayed in masked form. If APP_SECRET_KEY changes, re-enter your keys.
+    Each provider has its own key and bills requests to that key.
+  </p>
+</div>
+{% endblock %}

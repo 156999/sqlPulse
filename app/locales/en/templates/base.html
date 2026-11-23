@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}SQL Pulse{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/ui-language.js"></script>
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/vendor/htmx.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo">SQL&nbsp;Pulse</div>
+    {% if current_user or not auth_enabled %}
+    <nav class="business-nav">
+      <a href="/runs/new" {% block nav_new %}{% endblock %}>New Load Test </a>
+      <a href="/datagen" {% block nav_datagen %}{% endblock %}>Data Generation </a>
+      <a href="/datagen/multi" {% block nav_datagen_multi %}class="nav-sub"{% endblock %}>Multi-table Import </a>
+      <a href="/connections" {% block nav_connections %}{% endblock %}>Connections </a>
+      <a href="/profile" {% block nav_profile %}{% endblock %}>Profile </a>
+      <a href="/runs" {% block nav_runs %}{% endblock %}>Test History </a>
+    </nav>
+    {% else %}
+    <nav class="auth-nav">
+      <a href="/login" {% block nav_login %}{% endblock %}>Sign In </a>
+      {% if auth_allow_register %}<a href="/register" {% block nav_register %}{% endblock %}>Sign Up </a>{% endif %}
+    </nav>
+    {% endif %}
+    <div class="sidebar-foot">
+      {% if current_user %}
+      <div class="user-box">
+        <span class="user-name">{{ current_user.username }}</span>
+        <form method="post" action="/logout" class="logout-form">
+          <button type="submit" class="logout-btn"> Sign Out </button>
+        </form>
+      </div>
+      {% endif %}
+      <div class="foot-line">MVP · SQL Boys</div>
+    </div>
+  </aside>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

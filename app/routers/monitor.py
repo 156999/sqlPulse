@@ -19,7 +19,8 @@ router = APIRouter()
 
 @router.get("/api/runs/{run_id}/metrics")
 def get_metrics(run_id: str, ts_from: int = None, ts_to: int = None, user: Optional[dict] = Depends(require_user)):
-    try: run_jobs.require_owned_run(connection_manager.current_user_id(user), run_id)
+    try:
+        run = run_jobs.require_owned_run(connection_manager.current_user_id(user), run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"任务 {run_id} 不存在")
     points = db.get_metrics(run_id, ts_from, ts_to)
@@ -74,7 +75,7 @@ async def stream(run_id: str, user: Optional[dict] = Depends(require_user)):
                 yield f"data: {json.dumps(p, ensure_ascii=False)}\n\n"
             while True:
                 run = db.get_run(run_id)
-                if not run or run["status"] != "running":
+                if not run or run["status"] not in ("pending", "running"):
                     # Final source rows can be newer than the last collector tick.
                     for p in db.get_metrics(run_id):
                         yield f"data: {json.dumps(p, ensure_ascii=False)}\n\n"

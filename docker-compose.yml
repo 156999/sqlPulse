@@ -12,6 +12,7 @@ services:
     ports:
       - "${WEB_PORT:-8080}:8080"
     environment:
+      - SQLPULSE_UI_LANGUAGE=${SQLPULSE_UI_LANGUAGE:-zh-CN}
       # 以下 5 项只是「新建连接」表单的初始值，应用启动时不会去连任何库。
       # 默认留空，让使用者填自己那台 MySQL；容器内写 localhost 指的是容器本身，天然是错的。
       - TARGET_DB_HOST=${TARGET_DB_HOST:-}

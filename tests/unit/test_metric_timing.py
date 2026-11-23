@@ -38,7 +38,7 @@ def timing_db(monkeypatch, tmp_path):
     (tmp_path / "locust").mkdir()
     run = dict(id="timing", name="timing", status="running", sql_source="paste",
                sql_content="SELECT 1", concurrency=1, spawn_rate=1, duration_sec=10,
-               db_dsn_json="{}", created_at="2026-11-02T12:00:00")
+               db_dsn_json="{}", created_at="2026-11-02T12:00:00", owner_user_id="anonymous")
     db.create_run(run)
     yield tmp_path / "locust" / "timing_stats_history.csv"
     db._conn.close()
@@ -174,7 +174,8 @@ def test_watcher_backfills_before_terminal_state_and_report(timing_db, monkeypat
 
 
 def test_metrics_endpoint_declares_mixed_scopes(timing_db):
-    payload = monitor.get_metrics("timing")
+    payload = monitor.get_metrics("timing", user=None)
+    assert payload["observability"]["quality"] == "pending"
     assert payload["window_scope"] == "mixed"
     assert payload["metric_scopes"]["avg_ms"] == "cumulative"
 

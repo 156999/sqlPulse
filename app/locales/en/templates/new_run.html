@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}New Load Test · SQL Pulse{% endblock %}
+{% block nav_new %}class="active"{% endblock %}
+{% block content %}
+<h1>New Load Test</h1>
+<form id="run-form" class="card">
+  <div class="form-row">
+    <label>Test Name</label>
+    <input type="text" id="f-name" required maxlength="100" placeholder="e.g., Order Query Baseline ">
+  </div>
+
+  <fieldset>
+    <legend>Target Database</legend>
+    <div class="conn-switch">
+      <span class="seg">
+        <button type="button" class="seg-btn {% if connections %}active{% endif %}" data-conn-mode="saved">Saved Connection</button>
+        <button type="button" class="seg-btn {% if not connections %}active{% endif %}" data-conn-mode="temp">Temporary Connection</button>
+      </span>
+    </div>
+    <div id="conn-saved" {% if not connections %}style="display:none"{% endif %}>
+      <div class="form-row">
+        <label>My Connections</label>
+        <select id="f-connection-id">
+          {% for conn in connections %}
+          <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.host }}:{{ conn.port }}/{{ conn.database }})</option>
+          {% else %}
+          <option value="">No saved connections. Create one on the Connections page.</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-test-saved" class="secondary">Test Connection</button>
+        <span id="db-test-result" class="hint"></span>
+      </div>
+    </div>
+    <div id="conn-temp" {% if connections %}style="display:none"{% endif %}>
+      <div class="grid5">
+        <div><label>Host</label><input type="text" id="f-host" value="{{ default_dsn.host }}"></div>
+        <div><label>Port</label><input type="number" id="f-port" value="{{ default_dsn.port }}"></div>
+        <div><label>User</label><input type="text" id="f-user" value="{{ default_dsn.user }}"></div>
+        <div><label>Password</label><input type="password" id="f-password" value=""></div>
+        <div><label>Database</label><input type="text" id="f-database" value="{{ default_dsn.database }}"></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-test-db" class="secondary">Test Connection</button>
+        <span id="db-test-result-temp" class="hint"></span>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>SQL Task Groups</legend>
+    <p class="hint"> Each task group runs its SQL statements in order. Its weight determines how often the group is selected.</p>
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="form">Build in Form</button>
+      <button type="button" class="tab" data-tab="paste">Import from SQL Text</button>
+      <button type="button" class="tab" data-tab="file">Import from SQL File</button>
+      <button type="button" id="btn-example" class="tab" style="margin-left:auto">Load Example</button>
+    </div>
+    <div id="tab-form">
+      <div id="task-list"></div>
+      <button type="button" id="btn-add-task" class="secondary">+  Add Task Group</button>
+    </div>
+    <div id="tab-paste" style="display:none">
+      <textarea id="f-sql" rows="10" placeholder="-- weight: 70&#10;SELECT * FROM orders WHERE id = {{ '{{rand(1,10000)}}' }};&#10;SELECT * FROM orders WHERE created_at &gt; {{ "{{randdt('2026-01-01 00:00:00','2026-12-31 00:00:00')}}" }};&#10;&#10;-- weight: 30&#10;BEGIN;&#10;UPDATE stock SET qty = qty - 1 WHERE sku = {{ "{{pickw(('SKU1',70),('SKU2',30))}}" }};&#10;COMMIT;"></textarea>
+    </div>
+    <div id="tab-file" style="display:none">
+      <input type="file" id="f-sql-file" accept=".sql,.txt">
+      <p class="hint">The original file is kept. Review the parsed result before applying it to the form. Edit and reimport unsupported scripts. </p>
+      <pre id="file-preview" class="sql-view" hidden></pre>
+      <button type="button" id="btn-edit-file" class="secondary">Copy to Text Editor</button>
+    </div>
+    <div id="import-actions" hidden>
+      <p class="hint">Parse the input and apply the result to the form before starting a load test. Your current groups are kept until you choose how to apply the import.</p>
+      <button type="button" id="btn-parse-import" class="secondary">Parse and Preview</button>
+      <div id="import-errors" role="alert" aria-live="polite"></div>
+      <section id="import-result" class="preview-panel" hidden aria-live="polite"></section>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Named Variables (optional)</legend>
+    <p class="hint">Variables are generated once per group execution and reused within that execution. Put the cursor in the SQL editor and click Insert Placeholder.</p>
+    <div class="variable-scroll"><table class="table variable-table">
+      <thead><tr><th>Name</th><th>Generation Type</th><th>Parameters</th><th>Actions</th></tr></thead>
+      <tbody id="variable-list"></tbody>
+    </table></div>
+    <button type="button" id="btn-add-variable" class="secondary">+ Add Variable</button>
+    <div id="legacy-variables" hidden>
+      <p class="hint err"> The old variable configuration has not been converted, the original text has been retained. Please try again after you have amended it. </p>
+      <textarea id="legacy-variable-text" rows="4" aria-label="Old Variable Configuration "></textarea>
+      <button type="button" id="btn-migrate-variables" class="secondary">Convert Variables</button>
+    </div>
+    <p class="hint"> Use unquoted placeholders only where a data value is allowed. Inline random placeholders are sampled independently; use {% raw %}{{var('order_id')}}{% endraw %} for a named variable.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Load Test Settings</legend>
+    <div class="grid3">
+      <div><label>Concurrent Users (1–500)</label><input type="number" id="f-concurrency" value="10" min="1" max="500"></div>
+      <div><label>Users Started per Second</label><input type="number" id="f-spawn-rate" value="5" min="1" max="500"></div>
+      <div><label>Duration (5–3600 seconds)</label><input type="number" id="f-duration" value="30" min="5" max="3600"></div>
+    </div>
+  </fieldset>
+
+  <div id="form-errors" role="alert" aria-live="polite"></div>
+  <div id="undo-bar" class="form-notice" hidden></div>
+  <section id="preview-panel" class="preview-panel" hidden aria-live="polite"></section>
+  <div class="form-actions" id="form-submit-actions">
+    <button type="button" id="btn-preview" class="secondary">Validate and Preview</button>
+    <button type="submit" id="btn-submit" class="primary">Start Load Test</button>
+    <span id="submit-result" class="hint"></span>
+  </div>
+</form>
+
+<script src="/static/run_form.js" defer></script>
+{% endblock %}

@@ -5,13 +5,19 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '../..');
-const template = fs.readFileSync(path.join(root, 'app/templates/monitor.html'), 'utf8');
-const pageScript = template.match(/<script>\s*([\s\S]*?)<\/script>/)[1]
+function getPageScript(language) {
+  const templatePath = language === 'en'
+    ? 'app/locales/en/templates/monitor.html'
+    : 'app/templates/monitor.html';
+  const template = fs.readFileSync(path.join(root, templatePath), 'utf8');
+  return template.match(/<script>\s*([\s\S]*?)<\/script>/)[1]
   .replace(/{{\s*\(run\.ended_at or ''\)\s*\|\s*tojson\s*}}/, '""')
   .replace(/{{\s*run\.id\s*}}/g, 'fixture')
   .replace(/{{\s*run\.started_at or ""\s*}}/g, '2026-11-02T12:00:00');
 
-function fixture() {
+}
+
+function fixture(language = 'zh-CN') {
   const elements = new Map();
   const calls = [];
   const element = id => {
@@ -24,10 +30,11 @@ function fixture() {
   };
   let status = 'running';
   let points = [];
+  let metricsFail = false;
   const sandbox = {
-    console, Date, setInterval: () => 1, clearInterval() {},
+    console, Date, sqlPulseUiText: value => value, setInterval: () => 1, clearInterval() {},
     requestAnimationFrame: callback => callback(),
-    document: {getElementById: element, querySelectorAll: () => [], createElement: element},
+    document: {documentElement: {lang: language}, getElementById: element, querySelectorAll: () => [], createElement: element},
     Chart: class {
       constructor(ctx, config) { Object.assign(this, config); }
       update() {}
@@ -38,15 +45,22 @@ function fixture() {
       let payload;
       if (url.endsWith('/per-sql-metrics')) payload = {sql_1: [{ts: 100, p99_ms: 20}]};
       else if (url.endsWith('/events')) payload = {events: [], thresholds: {}};
-      else if (url.endsWith('/metrics')) payload = {points};
+      else if (url.endsWith('/metrics')) {
+        if (metricsFail) return {ok: false};
+        payload = {points};
+      }
       else payload = {status, ended_at: '2026-11-02T12:00:10', observability: {quality: 'valid', request_count: 120, latest_capacity: {}}};
       return {ok: true, json: async () => payload};
     },
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(root, 'app/static/monitor_timeline.js'), 'utf8'), context);
-  vm.runInContext(pageScript, context);
-  return {context, calls, elements, finish(newPoints) { status = 'finished'; points = newPoints; }};
+  vm.runInContext(getPageScript(language), context);
+  return {
+    context, calls, elements,
+    finish(newPoints) { status = 'finished'; points = newPoints; },
+    failMetrics(value) { metricsFail = value; },
+  };
 }
 
 test('SQL arrival and replay do not add resource points or duplicate source points', async () => {
@@ -73,8 +87,8 @@ test('terminal refresh replaces all timelines and refreshes per-SQL and events',
     {ts: 106, source_ts: 106, metric_scope: 'sql', qps: 12, request_count: 120},
   ]);
   const start = f.calls.length;
-  await vm.runInContext('finishPoll()', f.context);
-  await vm.runInContext('finishPoll()', f.context); // repeated end signals are harmless
+  await vm.runInContext('syncRun()', f.context);
+  await vm.runInContext('syncRun()', f.context); // repeated end signals are harmless
   const result = vm.runInContext(`({sql: charts.qps.data.datasets[0].data.map(p=>p.x), resource: charts.capacityCpu.data.datasets[0].data.map(p=>p.x), done: finished})`, f.context);
   assert.deepEqual(JSON.parse(JSON.stringify(result)), {sql: [100, 106], resource: [105.5], done: true});
   const terminalCalls = f.calls.slice(start);
@@ -82,3 +96,25 @@ test('terminal refresh replaces all timelines and refreshes per-SQL and events',
   assert.ok(terminalCalls.some(url => url.endsWith('/events')));
   assert.equal(f.elements.get('collector-state').textContent, '任务已结束');
 });
+
+for (const language of ['zh-CN', 'en']) {
+  test(language + ': completion stops the timer when final metrics fail and retries', async () => {
+    const f = fixture(language);
+    await new Promise(setImmediate);
+    f.finish([]);
+    f.failMetrics(true);
+    await vm.runInContext('syncRun()', f.context);
+
+    assert.equal(f.elements.get('elapsed').textContent, '10s');
+    assert.equal(f.elements.get('run-status').textContent, 'finished');
+    assert.equal(f.elements.get('link-report').style.display, '');
+    assert.equal(f.elements.get('collector-state').textContent, language === 'en'
+      ? 'Could not load final metrics. Retrying…' : '结束数据读取失败，正在重试');
+
+    f.failMetrics(false);
+    await vm.runInContext('syncRun()', f.context);
+    assert.equal(f.elements.get('elapsed').textContent, '10s');
+    assert.equal(f.elements.get('collector-state').textContent.trim(),
+      language === 'en' ? 'Test ended' : '任务已结束');
+  });
+}

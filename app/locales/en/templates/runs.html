@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Test History · SQL Pulse{% endblock %}
+{% block nav_runs %}class="active"{% endblock %}
+{% block content %}
+<h1>Test History</h1>
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr><th>Created</th><th>Name</th><th>run_id</th><th>Status</th><th>Users</th><th>Length</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td>{{ r.created_at or '-' }}</td>
+        <td>{{ r.name }}</td>
+        <td><code>{{ r.id }}</code></td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.concurrency }}</td>
+        <td>{{ r.duration_sec }}s</td>
+        <td class="ops">
+          <a href="/runs/{{ r.id }}/monitor">Monitor</a>
+          {% if r.status in ('finished', 'failed', 'cancelled') %}
+            <a href="/runs/{{ r.id }}/explain" title="Execution plans collected after the test ">Execution Plans</a>
+            <a href="/runs/{{ r.id }}/report">Report</a>
+          {% endif %}
+          {% if r.has_report %}
+            <a href="/api/runs/{{ r.id }}/report/download">Download</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">We’re out of business. Go. <a href="/runs/new">New Load Test</a></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<script>setTimeout(() => location.reload(), 5000);</script>
+{% endblock %}

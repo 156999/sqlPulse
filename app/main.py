@@ -4,14 +4,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from loguru import logger
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import db
 from app.auth import require_user
 from app.config import settings
+from app.ui_language import LocaleStaticFiles, js_catalog
 from app.routers import ai, auth, connections, datagen, explain, monitor, pages, reports, tasks
 from app.services.collector import collector
 from app.services.report import generate_report
@@ -74,4 +74,15 @@ app.include_router(explain.router, dependencies=[Depends(require_user)])
 app.include_router(monitor.router, dependencies=[Depends(require_user)])
 app.include_router(reports.router, dependencies=[Depends(require_user)])
 app.include_router(ai.router, dependencies=[Depends(require_user)])
-app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+
+
+@app.get("/static/ui-language.js", include_in_schema=False)
+def ui_language_script():
+    return Response(
+        js_catalog(settings.ui_language),
+        media_type="text/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+app.mount("/static", LocaleStaticFiles(shared_dir=Path(__file__).parent / "static"), name="static")

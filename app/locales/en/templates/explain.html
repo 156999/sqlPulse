@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Execution Plans · {{ view.run_id }} · SQL Pulse{% endblock %}
+{% block nav_runs %}class="active"{% endblock %}
+{% block content %}
+<style>
+  .ex-good { color: #059669; font-weight: 600; }
+  .ex-ok { color: #4b5563; }
+  .ex-warn { color: #d97706; font-weight: 600; }
+  .ex-bad { color: #dc2626; font-weight: 600; }
+  .ex-unknown { color: #9ca3af; }
+  .advice-ok { border-color: #059669; background: #ecfdf5; }
+  .ex-badge { display: inline-block; padding: 2px 9px; border-radius: 10px;
+              font-size: 12px; color: #fff; background: #6b7280; white-space: nowrap; }
+  .ex-badge-ok { background: #059669; }
+  .ex-badge-muted { background: #9ca3af; }
+  .ex-badge-warn { background: #d97706; }
+  .ex-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+  .ex-stat-label { font-size: 12px; color: #6b7280; }
+  .ex-stat-value { font-size: 15px; color: #111827; margin-top: 2px; word-break: break-all; }
+  .ex-stat-sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
+  .ex-stmt { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+  .ex-stmt-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .ex-tag { display: inline-block; font-size: 12px; border: 1px solid #e5e7eb;
+            background: #f9fafb; border-radius: 8px; padding: 1px 7px; margin-right: 6px; }
+  .ex-kv { font-size: 12px; color: #6b7280; }
+  .ex-params { font-size: 12px; color: #6b7280; margin: 6px 0 0; }
+  .ex-params code { background: #f3f4f6; border-radius: 4px; padding: 0 4px; }
+  /* No implementation plan statement (service control)  / SET / Overload) not to take a single card, to include a line of folding summaries  */
+  .ex-skipped { border: 1px dashed #e5e7eb; border-radius: 8px; padding: 10px 14px;
+                background: #fafafa; margin-top: 4px; }
+  .ex-skipped > summary { cursor: pointer; font-size: 13px; color: #6b7280; }
+</style>
+
+<h1>Execution Plans  <small class="muted">{{ view.run_name or view.run_id }} · {{ view.run_id }}</small></h1>
+
+<p class="hint">
+  <a href="/runs/{{ view.run_id }}/monitor">Live Monitor</a> ·
+  <a href="/runs/{{ view.run_id }}/report">Load Test Report</a> ·
+  <a href="/api/runs/{{ view.run_id }}/explain">Raw JSON</a>
+</p>
+
+{% if not view.available %}
+  <div class="card muted">{{ (view.hint)|ui_text }}</div>
+{% else %}
+
+  <div class="advice {{ view.headline.cls }}">
+    <strong>{{ (view.headline.title)|ui_text }}</strong>
+    <p>{{ (view.headline.detail)|ui_text }}</p>
+  </div>
+
+  <div class="card">
+    <h3>Collection Summary</h3>
+    <div class="ex-stats">
+      {% for s in view.stats %}
+      <div>
+        <div class="ex-stat-label">{{ (s.label)|ui_text }}</div>
+        <div class="ex-stat-value">{{ (s.value)|ui_text }}</div>
+        {% if s.sub %}<div class="ex-stat-sub">{{ (s.sub)|ui_text }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <p class="hint" style="margin-top:14px">
+       {% if view.phase == 'post_run' %}Collected after the test{% else %}Collected{% endif %} · {{ view.generated_at }} · Format  v{{ view.probe_version }}
+      {% if view.truncated %} · <span class="ex-warn"> Collection stopped early ({{ (view.truncated_reason)|ui_text }}); some statements were skipped</span>{% endif %}
+    </p>
+    {% if view.error %}<p class="err-msg"> Collection error: <code>{{ (view.error)|ui_text }}</code></p>{% endif %}
+  </div>
+
+  {% for t in view.tasks %}
+  <div class="card">
+    <h3>
+      <code>{{ t.sql_id }}</code>
+      <span class="tag"> Weight {{ t.weight }}</span>
+      <span class="tag">{{ t.statements|length }} Statements </span>
+      {% if t.skipped %}<span class="tag">{{ t.skipped|length }} Not collected </span>{% endif %}
+</h3>
+
+    {% for s in t.shown %}
+    <div class="ex-stmt">
+      <div class="ex-stmt-head">
+        <span class="ex-badge {{ s.status_badge }}">{{ (s.status_label)|ui_text }}</span>
+        <strong>#{{ s.no }}</strong>
+        {% if s.max_rows %}<span class="ex-kv"> Estimated scan: {{ s.max_rows }} rows</span>{% endif %}
+      </div>
+
+      <pre class="sql-view">{{ s.original }}</pre>
+
+      {% if s.filled %}
+      <p class="hint" style="margin:8px 0 6px">Statement with placeholders bound to representative values: </p>
+      <pre class="sql-view">{{ s.filled }}</pre>
+      {% endif %}
+
+      {% if s.params %}
+      <p class="ex-params">
+         Bound parameters:
+        {% for p in s.params %}<code>{{ p.value }}</code> <span class="muted">{{ p.type }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
+      </p>
+      {% endif %}
+
+      {% for f in s.findings %}
+      <div class="advice {{ f.cls }}" style="margin-top:10px">
+        <strong>{{ (f.label)|ui_text }}</strong>
+        {% if f.table %}<span class="ex-kv"> Table <code>{{ f.table }}</code></span>{% endif %}
+        <p>{{ (f.detail)|ui_text }}</p>
+      </div>
+      {% endfor %}
+
+      {% if s.plan %}
+      <table class="table" style="margin-top:12px">
+        <thead>
+          <tr><th>Table</th><th>Access Type</th><th>Index Used</th><th>Available Indexes</th><th>Estimated rows</th><th>Extra</th></tr>
+        </thead>
+        <tbody>
+        {% for p in s.plan %}
+          <tr>
+            <td><code>{{ p.table }}</code></td>
+            <td class="{{ p.access_cls }}">{{ p.access }}
+              {% if p.access_text %}<span class="ex-kv">{{ (p.access_text)|ui_text }}</span>{% endif %}
+            </td>
+            <td>{% if p.key_is_null %}<span class="ex-bad">NULL</span>{% else %}<code>{{ p.key }}</code>{% endif %}</td>
+            <td class="muted">{{ p.possible_keys }}</td>
+            <td>{{ p.rows }}</td>
+            <td title="{{ p.extra }}">
+              {% for tg in p.extra_tags %}<span class="ex-tag {{ tg.cls }}">{{ (tg.text)|ui_text }}</span>{% endfor %}
+              {% if not p.extra_tags %}<span class="muted">—</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if not t.shown %}
+    <p class="hint"> This group has no statements that produce an execution plan. Its statements still run during the load test.</p>
+    {% endif %}
+
+    {% if t.skipped %}
+    <details class="ex-skipped">
+      <summary>{{ (t.skipped_hint)|ui_text }}</summary>
+      <ul class="hint" style="margin:10px 0 0 18px; line-height:1.8">
+        {% for s in t.skipped %}
+        <li>#{{ s.no }} <code>{{ s.sql }}</code> · {{ (s.status_label)|ui_text }}{% if s.reason %} —— {{ (s.reason)|ui_text }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <details class="card">
+    <summary>Known Limitations</summary>
+    <ul class="hint" style="margin:10px 0 0 18px; line-height:1.9">
+      {% for n in view.notes %}<li>{{ (n)|ui_text }}</li>{% endfor %}
+    </ul>
+  </details>
+
+  <p class="hint">
+    This page displays MySQL EXPLAIN output: access type, index used, estimated rows, and Extra.
+    It does not modify data. See the report for analysis and recommendations.
+
+  </p>
+
+{% endif %}
+{% endblock %}

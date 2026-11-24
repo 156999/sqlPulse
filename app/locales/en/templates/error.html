@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Something went wrong · SQL Pulse{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Something went wrong</h1>
+  <p>{{ (message)|ui_text }}</p>
+  <p><a href="/runs">_Other Organiser</a></p>
+</div>
+{% endblock %}

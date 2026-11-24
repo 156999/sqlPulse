@@ -193,3 +193,14 @@ scripts/seed_demo.sql  示例库建库造数（orders 1w / stock 500 / access_lo
 ```
 
 数据落盘：本地运行在 `data/`（SQLite + locustfile + locust CSV）、`logs/app.log`、`reports/<run_id>/`；docker compose 部署时对应目录为命名卷 `sqlpulse_data` / `sqlpulse_logs` / `sqlpulse_reports`。
+
+### 网页语言 / Web interface language
+
+在项目本地 .env 中设置 SQLPULSE_UI_LANGUAGE=en 并重启 SQL Pulse，
+网页将以英文显示。设为 zh-CN（默认值）可切回简体中文。Docker Compose
+部署时改好 .env 后运行 docker compose up -d web，使容器采用新配置。
+
+Set SQLPULSE_UI_LANGUAGE=en in the project's local .env file and restart SQL Pulse.
+Use zh-CN to switch back to Simplified Chinese. The language applies to the whole
+web service. Saved names, submitted SQL, database messages, and previously saved
+AI diagnoses stay as recorded.

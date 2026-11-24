@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Report · {{ run.name }} · SQL Pulse{% endblock %}
+{% block content %}
+<h1>Load Test Report  <small class="muted">{{ run.name }} · {{ run.id }}</small></h1>
+
+{% if not report %}
+<div class="card muted"> The report has not yet been generated (the task is still in operation or is abnormally terminated).</div>
+{% else %}
+{% set l0 = report.l0 %}
+<div class="card">
+  <h3>Test Settings</h3>
+  <p>
+    Status:<span class="badge badge-{{ run.status }}">{{ run.status }}</span>
+    ·  Users {{ run.concurrency }} (spawn {{ run.spawn_rate }}/s)
+    ·  Planned  {{ run.duration_sec }}s ( actual  {{ l0.actual_duration_sec or '-' }}s)
+    · {{ run.started_at or '-' }} ~ {{ run.ended_at or '-' }}
+  </p>
+  {% if run.error_msg %}<p class="err-msg"> Cannot initialise Evolution’s mail component:<code>{{ (run.error_msg)|ui_text }}</code></p>{% endif %}
+</div>
+
+<details class="card">
+  <summary>SQL submitted ({{ run.sql_source }})</summary>
+  <pre class="sql-view">{{ run.sql_content }}</pre>
+</details>
+
+<div class="card">
+  <h3>L0 Metrics Summary</h3>
+  <table class="table">
+    <tr><th>Total Requests</th><td>{{ l0.total_requests }}</td><th>Total Failures</th><td>{{ l0.total_failures }}</td></tr>
+    <tr><th>Error Rate</th><td>{% if l0.err_rate is not none %}{{ "%.2f"|format(l0.err_rate * 100) }}%{% else %}-{% endif %}</td>
+        <th>QPS Mean / Peak</th><td>{{ l0.qps_avg|round(1) if l0.qps_avg is not none else '-' }} / {{ l0.qps_peak|round(1) if l0.qps_peak is not none else '-' }}</td></tr>
+    <tr><th>Average Latency</th><td>{{ l0.avg_ms|round(1) if l0.avg_ms is not none else '-' }} ms</td>
+        <th>P50 / P95 / P99</th><td>{{ l0.p50_ms|round(1) if l0.p50_ms is not none else '-' }} / {{ l0.p95_ms|round(1) if l0.p95_ms is not none else '-' }} / {{ l0.p99_ms|round(1) if l0.p99_ms is not none else '-' }} ms</td></tr>
+    <tr><th>Maximum delay</th><td>{{ l0.max_ms|round(1) if l0.max_ms is not none else '-' }} ms</td>
+        <th>Threads_running P95</th><td>{{ l0.threads_running_p95 if l0.threads_running_p95 is not none else '-' }}</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Per-statement Statistics</h3>
+  <table class="table">
+    <thead><tr><th>Statement</th><th>Content</th><th>Requests</th><th>Failures</th><th>Average</th><th>P95</th><th>P99</th><th>Max</th><th>QPS</th><th>Plan Issues</th><th>Triggered Rules</th></tr></thead>
+    <tbody>
+    {% set per_sql_rows = l1_view.per_sql if l1_view else l0.per_sql %}
+    {% for s in per_sql_rows %}
+      <tr>
+        <td><code>{{ s.sql_id }}</code></td>
+        <td class="sql-cell" title="{{ s.sql }}">{{ s.sql|truncate(60) }}</td>
+        <td>{{ s.requests }}</td><td>{{ s.failures }}</td>
+        <td>{{ s.avg_ms|round(1) if s.avg_ms is not none else '-' }}</td>
+        <td>{{ s.p95_ms|round(1) if s.p95_ms is not none else '-' }}</td>
+        <td>{{ s.p99_ms|round(1) if s.p99_ms is not none else '-' }}</td>
+        <td>{{ s.max_ms|round(1) if s.max_ms is not none else '-' }}</td>
+        <td>{{ s.qps|round(1) if s.qps is not none else '-' }}</td>
+        <td class="muted">{{ (s.plan_findings or '-')|ui_text }}</td>
+        <td class="muted">{{ s.hit_rules or '-' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="11" class="muted"> No data</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if l1_view %}
+<details class="card" open>
+  <summary>L1  Diagnosis <span class="tag">Local rules ·  No model required</span></summary>
+
+  <div class="advice {{ l1_view.verdict_cls }}">
+    <strong>{{ (l1_view.verdict.title)|ui_text }}</strong>
+    <p>{{ (l1_view.verdict.summary)|ui_text }}</p>
+    <p class="muted">Critical {{ l1_view.error_count }} · Warning  {{ l1_view.warn_count }}</p>
+  </div>
+
+  {% for f in l1_view.findings %}
+  <div class="advice {{ f.cls }}">
+    <strong>[{{ f.severity|upper }}] {{ (f.title)|ui_text }}</strong>
+    {% if f.scope_text %}<p class="muted">Positioning: {{ f.scope_text }}</p>{% endif %}
+    {% if f.detail %}<p>{{ (f.detail)|ui_text }}</p>{% endif %}
+    {% if f.evidence %}
+    <ul>
+      {% for e in f.evidence %}
+      <li><b>[{{ (e.source_label)|ui_text }}]</b> {{ (e.label)|ui_text }}: {{ (e.value)|ui_text }}
+        {% if e.detail %}<span class="muted"> ({{ (e.detail)|ui_text }})</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if f.root_cause %}<p>GEN: {{ (f.root_cause)|ui_text }}</p>{% endif %}
+    {% if f.actions %}
+    <ul>
+      {% for a in f.actions %}
+      <li>[{{ (a.layer_label)|ui_text }}] {{ (a.text)|ui_text }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted"> There are no rules for this round.</p>
+  {% endfor %}
+</details>
+
+{% if l1_view.completeness %}
+<div class="card">
+  <h3>Collection Coverage and Limitations</h3>
+  <table class="table">
+    <tr><th>Execution Plans</th><td>
+      {% if l1_view.completeness.plan_available %}
+         Collected  {{ l1_view.completeness.plan_probed or 0 }} / {{ l1_view.completeness.plan_statements or 0 }} Statements
+      {% else %}
+        {{ (l1_view.completeness.plan_reason)|ui_text }}
+      {% endif %}
+    </td></tr>
+    <tr><th>Engine indicators</th><td>{{ l1_view.completeness.metrics_points or 0 }} A sample point. </td></tr>
+    <tr><th>Sample Volume</th><td>{{ l1_view.completeness.total_requests or 0 }} Requests </td></tr>
+    <tr><th>Duration Ratio</th><td>{{ l1_view.completeness.duration_ratio or 0 }}</td></tr>
+  </table>
+  <p class="muted">Limitation: EXPLAIN  rows  Estimating for optimizers; EXPLAIN only explains the reading path, writing the path lock to see the line lock waiting for increase;
+     Slow query incremental target library long_query_time  Impacts can only be compared vertically with banks.</p>
+</div>
+{% endif %}
+{% else %}
+<div class="card">
+  <h3>L1 Rule Recommendations  <span class="tag"> Local rules ·  No model required</span></h3>
+  {% if report.l1 %}
+    {% for a in report.l1.findings if report.l1.findings is iterable %}
+      <div class="advice advice-{{ a.severity }}">
+        <strong>[{{ a.severity|upper }}] {{ (a.title)|ui_text }}</strong>
+        {% if a.detail %}<p>{{ (a.detail)|ui_text }}</p>{% endif %}
+      </div>
+    {% endfor %}
+  {% endif %}
+</div>
+{% endif %}
+
+{% include "ai_diagnose.html" %}
+
+<div class="form-actions">
+  <a class="primary" href="/api/runs/{{ run.id }}/report/download">Download Markdown Report</a>
+</div>
+{% endif %}
+{% endblock %}

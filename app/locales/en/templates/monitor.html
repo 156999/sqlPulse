@@ -1,0 +1,644 @@
+{% extends "base.html" %}
+{% block title %}Monitor · {{ run.name }} · SQL Pulse{% endblock %}
+{% block content %}
+<h1>Live Monitor  <small class="muted">{{ run.name }}</small></h1>
+
+<div class="status-bar card">
+  <span>run_id: <code>{{ run.id }}</code></span>
+  <span>Status:<span id="run-status" class="badge badge-{{ run.status }}">{{ run.status }}</span></span>
+  <span>Concurrent users: {{ run.concurrency }}</span>
+  <span> Planned duration: {{ run.duration_sec }}s</span>
+  <span>Elapsed: <span id="elapsed">-</span></span>
+  <span>Collector: <span id="collector-state" class="badge badge-running"> Connecting </span></span>
+  <button id="btn-stop" class="danger">Stop</button>
+  <a id="link-report" href="/runs/{{ run.id }}/report" class="primary" style="display:none">View Report</a>
+</div>
+
+<div id="quality-banner" class="card advice advice-info">
+  <strong>Result quality: <span id="quality-label">{{ observability.quality }}</span></strong>
+  <span id="quality-reason" class="muted">{{ (observability.quality_reason)|ui_text }}</span>
+  <span id="error-kind" class="muted"></span>
+</div>
+
+<div class="grid4 observability-cards">
+  <div class="card obs-card"><span class="muted">Requests</span><strong id="obs-request-count">-</strong></div>
+  <div class="card obs-card"><span class="muted">Failed Requests</span><strong id="obs-request-failures">-</strong></div>
+  <div class="card obs-card"><span class="muted"> User Initialization Failures</span><strong id="obs-start-failures">-</strong></div>
+  <div class="card obs-card"><span class="muted">Exceptions</span><strong id="obs-exceptions">-</strong></div>
+  <div class="card obs-card"><span class="muted">Final Aggregate QPS</span><strong id="obs-final-qps">-</strong></div>
+  <div class="card obs-card"><span class="muted"> Final Aggregate P99</span><strong id="obs-final-p99">-</strong></div>
+</div>
+
+<div class="grid4 observability-cards capacity-summary">
+  <div class="card obs-card"><span class="muted">Current Connections </span><strong id="obs-threads-connected">-</strong></div>
+  <div class="card obs-card"><span class="muted"> Maximum Connections </span><strong id="obs-max-connections">-</strong></div>
+  <div class="card obs-card"><span class="muted"> Active Users </span><strong id="obs-active-users">-</strong></div>
+  <div class="card obs-card"><span class="muted"> Connection Utilization </span><strong id="obs-connection-usage">-</strong></div>
+</div>
+
+<div id="obs-detail" class="card muted"> Live metrics cover users who connected successfully. Final totals come from the Locust summary after the test finishes. </div>
+
+<details class="card" open>
+  <summary>SQL Task Groups ({{ tasks|length }}; matched by sql_id in charts and reports)</summary>
+  <table class="table">
+    <thead><tr><th>sql_id</th><th>Weight</th><th>Statement Contents</th><th>P95 ( Most recent)</th><th>P99 (Most recent)</th></tr></thead>
+    <tbody>
+    {% for t in tasks %}
+      <tr>
+        <td><code>{{ t.sql_id }}</code></td>
+        <td>{{ t.weight }}</td>
+        <td class="sql-cell">{{ t.statements|join('; ') }}</td>
+        <td id="ps-{{ t.sql_id }}-p95" class="muted">-</td>
+        <td id="ps-{{ t.sql_id }}-p99" class="muted">-</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <details><summary>Original SQL ({{ run.sql_source }})</summary><pre class="sql-view">{{ run.sql_content }}</pre></details>
+</details>
+
+<h2 class="section-title">Load Test Metrics</h2>
+<p class="chart-hint">SQL charts use Locust’s source timestamps, not the time the browser received the data. QPS is smoothed over recent complete one-second buckets; P95 and P99 use a window of about 10 seconds. Average latency and error rate are cumulative. Each SQL request is recorded at completion, so the chart cannot show when an individual request began. Gaps longer than 2.5 seconds appear as breaks.</p>
+<div class="chart-stack">
+  <div class="card chart-card">
+    <div class="chart-head"><h3>QPS (Recent Smoothed) and Error Rate (Cumulative)</h3></div>
+    <div class="chart-body"><canvas id="chart-qps"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>Average Response Latency (Cumulative)</h3></div>
+    <div class="chart-body"><canvas id="chart-latency-avg"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>Tail Response Latency (P95 / P99)</h3></div>
+    <div class="chart-body"><canvas id="chart-latency-percentiles"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head">
+      <h3>Per-statement Response Latency</h3>
+      <div class="chart-controls">
+        <label class="chart-select-label" for="persql-select">SQL</label>
+        <select id="persql-select" class="chart-select" aria-label=" Select a SQL statement to display">
+          <option value="">Waiting for data</option>
+        </select>
+        <div class="seg">
+        <button type="button" class="seg-btn" data-metric="p95">P95</button>
+        <button type="button" class="seg-btn active" data-metric="p99">P99</button>
+        </div>
+      </div>
+    </div>
+    <div id="persql-hint" class="chart-hint"> One statement is shown by default. Select “All SQL” to compare statements.</div>
+    <div class="chart-body"><canvas id="chart-persql"></canvas></div>
+  </div>
+</div>
+
+<h2 class="section-title">MySQL Engine Metrics</h2>
+<p class="chart-hint">MySQL and host metrics use their actual sample times. Counter rates use the elapsed time between two valid samples. </p>
+<div class="chart-grid engine-chart-grid">
+  <div class="card chart-card">
+    <div class="chart-head"><h3>Number of connections</h3></div>
+    <div class="chart-body"><canvas id="chart-conn"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>MySQL QPS</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-qps"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>Slow Queries</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-slow"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>Row Lock Waits</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-lock"></canvas></div>
+  </div>
+  <div class="card chart-card">
+    <div class="chart-head"><h3>On-disk Temporary Tables</h3></div>
+    <div class="chart-body"><canvas id="chart-engine-tmp"></canvas></div>
+  </div>
+</div>
+
+<h2 class="section-title">Host Resources</h2>
+<div class="chart-grid capacity-chart-grid">
+  <div class="card chart-card"><div class="chart-head"><h3>Host CPU Usage</h3></div><div class="chart-body"><canvas id="chart-capacity-cpu"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>Host Memory Usage</h3></div><div class="chart-body"><canvas id="chart-capacity-memory"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>Host disk usage</h3></div><div class="chart-body"><canvas id="chart-capacity-disk"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>Host Network Throughput</h3></div><div class="chart-body"><canvas id="chart-capacity-network"></canvas></div></div>
+</div>
+
+<h2 class="section-title">Database Capacity, Locks and InnoDB Log</h2>
+<div class="chart-grid capacity-chart-grid">
+  <div class="card chart-card"><div class="chart-head"><h3>Connection Capacity</h3></div><div class="chart-body"><canvas id="chart-db-connections"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>Lock Waits</h3></div><div class="chart-body"><canvas id="chart-db-locks"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>Deadlocks</h3></div><div class="chart-body"><canvas id="chart-db-deadlocks"></canvas></div></div>
+  <div class="card chart-card"><div class="chart-head"><h3>InnoDB Log</h3></div><div class="chart-body"><canvas id="chart-db-log"></canvas></div></div>
+</div>
+
+<div class="card event-card">
+  <div class="chart-head"><h3>Event Timeline and Threshold Alerts</h3><span id="event-count" class="muted">-</span></div>
+  <div id="event-thresholds" class="threshold-list muted">Threshold loading... </div>
+  <ol id="event-timeline" class="event-timeline"><li class="muted">Waiting for data collection... </li></ol>
+</div>
+
+<script src="/static/monitor_timeline.js"></script>
+<script>
+const runId = '{{ run.id }}';
+const runStartedAt = '{{ run.started_at or "" }}';
+const startedAt = runStartedAt ? new Date(runStartedAt).getTime() : Date.now();
+const maxPoints = 600;
+const charts = {};
+const {upsert, formatTime} = SqlPulseTimeline;
+const pendingCharts = new Set();
+let drawScheduled = false;
+function redraw(chart) {
+  pendingCharts.add(chart);
+  if (drawScheduled) return;
+  drawScheduled = true;
+  requestAnimationFrame(() => {
+    pendingCharts.forEach(item => item.update('none'));
+    pendingCharts.clear();
+    drawScheduled = false;
+  });
+}
+
+function mkChart(id, datasets, opts) {
+  const ctx = document.getElementById(id).getContext('2d');
+  const options = Object.assign({
+    animation: false, responsive: true, maintainAspectRatio: false,
+    scales: {y: {beginAtZero: true, title: {display: true}}},
+    plugins: {legend: {labels: {boxWidth: 12}}}
+  }, opts || {});
+  options.scales.x = {
+    type: 'linear',
+    ticks: {maxTicksLimit: 10, callback: formatTime},
+    title: {display: true, text: ' Time'},
+  };
+  options.plugins.tooltip = options.plugins.tooltip || {};
+  options.plugins.tooltip.callbacks = {
+    ...(options.plugins.tooltip.callbacks || {}),
+    title: items => items.length ? formatTime(items[0].parsed.x) : '',
+  };
+  return new Chart(ctx, {
+    type: 'line',
+    data: {datasets: datasets.map(d => ({pointRadius: 0, borderWidth: 1.5, tension: 0, spanGaps: 2.5, ...d, data: []}))},
+    options,
+  });
+}
+
+charts.qps = mkChart('chart-qps', [
+  {label: ' Recent Smoothed QPS (queries/sec)', borderColor: '#2563eb', yAxisID: 'y'},
+  {label: 'Cumulative Request Error Rate (%)', borderColor: '#dc2626', yAxisID: 'y1', borderDash: [4, 3]}
+], {
+  scales: {
+    x: {ticks: {maxTicksLimit: 10}},
+    y: {beginAtZero: true, position: 'left', title: {display: true, text: 'QPS (queries/s)'},
+        ticks: {callback: v => v.toLocaleString()}},
+    y1: {beginAtZero: true, position: 'right', max: 1, grid: {drawOnChartArea: false},
+         title: {display: true, text: ' Error Rate (%)'}, ticks: {callback: v => (v * 100).toFixed(0) + '%'}}
+  },
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ctx.dataset.yAxisID === 'y1'
+      ? `  Error rate:${(ctx.parsed.y * 100).toFixed(2)}%`
+      : ` QPS: ${ctx.parsed.y.toFixed(1)}  times/seconds `
+  }}}
+});
+
+charts.latencyAvg = mkChart('chart-latency-avg', [
+  {label: ' Cumulative Average Latency ', borderColor: '#0891b2'}
+], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: ' Average Latency (ms)'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` Average Latency: ${ctx.parsed.y.toFixed(1)} ms`
+  }}}
+});
+
+charts.latencyPercentiles = mkChart('chart-latency-percentiles', [
+  {label: 'P95 (Current window) ', borderColor: '#d97706'},
+  {label: 'P99 ( Current window)', borderColor: '#dc2626'}
+], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: ' Latency (ms)'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} ms`
+  }}}
+});
+
+charts.persql = mkChart('chart-persql', [], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: ' Latency (ms)'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y === null ? 'No data' : ctx.parsed.y.toFixed(1) + ' ms'}`
+  }}}
+});
+
+charts.conn = mkChart('chart-conn', [
+  {label: 'Threads_running', borderColor: '#7c3aed'},
+  {label: 'Threads_connected', borderColor: '#059669'}
+], {
+  scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, precision: 0, title: {display: true, text: ' Connections'}}},
+  plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+    label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}  `
+  }}}
+});
+
+function mkEngineChart(id, label, color, unit = ' times/seconds ') {
+  return mkChart(id, [{label, borderColor: color}], {
+    scales: {x: {ticks: {maxTicksLimit: 10}}, y: {beginAtZero: true, title: {display: true, text: unit}}},
+    plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+      label: ctx => ` ${label}: ${ctx.parsed.y.toFixed(1)} ${unit}`
+    }}}
+  });
+}
+
+charts.engineQps = mkEngineChart('chart-engine-qps', 'MySQL QPS', '#0d9488');
+charts.engineSlow = mkEngineChart('chart-engine-slow', 'Slow Query ', '#dc2626');
+charts.engineLock = mkEngineChart('chart-engine-lock', ' Line lock and wait', '#d97706');
+charts.engineTmp = mkEngineChart('chart-engine-tmp', ' Disk Temporary Table', '#9333ea');
+
+function mkCapacityChart(id, datasets, yTitle, opts = {}) {
+  return mkChart(id, datasets, {
+    scales: {
+      x: {ticks: {maxTicksLimit: 10}},
+      y: {beginAtZero: true, title: {display: true, text: yTitle}, ...(opts.y || {})},
+      ...(opts.y1 ? {y1: {beginAtZero: true, position: 'right', grid: {drawOnChartArea: false}, ...opts.y1}} : {}),
+    },
+    plugins: {legend: {labels: {boxWidth: 12}}, tooltip: {callbacks: {
+      label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y == null ? ' No data ' : Number(ctx.parsed.y).toFixed(1)} ${ctx.dataset.unit || opts.unit || ''}`
+    }}},
+  });
+}
+
+charts.capacityCpu = mkCapacityChart('chart-capacity-cpu', [
+  {label: 'CPU', borderColor: '#2563eb'},
+], ' Usage rate (%) (%)', {unit: '%', y: {max: 100}});
+charts.capacityMemory = mkCapacityChart('chart-capacity-memory', [
+  {label: ' Memory', borderColor: '#059669'},
+], ' Usage rate (%) (%)', {unit: '%', y: {max: 100}});
+charts.capacityDisk = mkCapacityChart('chart-capacity-disk', [
+  {label: 'Disk ', borderColor: '#d97706'},
+], ' Usage rate (%) (%)', {unit: '%', y: {max: 100}});
+charts.capacityNetwork = mkCapacityChart('chart-capacity-network', [
+  {label: 'Received ', borderColor: '#0891b2'},
+  {label: ' Sent ', borderColor: '#9333ea'},
+], 'Swallow (MB/s)', {unit: 'MB/s'});
+charts.dbConnections = mkCapacityChart('chart-db-connections', [
+  {label: ' Current Connections ', borderColor: '#7c3aed', unit: ' '},
+  {label: ' Maximum Connections ', borderColor: '#dc2626', borderDash: [5, 3], unit: ' '},
+  {label: 'Active Users', borderColor: '#059669', unit: ' '},
+  {label: ' Connection Utilization ', borderColor: '#f59e0b', yAxisID: 'y1', unit: '%'},
+], ' Connections ', {unit: ' ', y1: {max: 100, title: {display: true, text: 'Utilization (%)'}}});
+charts.dbLocks = mkCapacityChart('chart-db-locks', [
+  {label: 'Lock Waits ', borderColor: '#d97706', yAxisID: 'y'},
+  {label: ' Lock Wait Time ', borderColor: '#dc2626', yAxisID: 'y1'},
+], 'Number of waiting times (number of times)/s)', {
+  unit: ' times/s',
+  y1: {title: {display: true, text: 'Wait Time (ms/s)'}},
+});
+charts.dbDeadlocks = mkCapacityChart('chart-db-deadlocks', [
+  {label: ' Deadlocks ', borderColor: '#dc2626'},
+], ' Number (several) /s)', {unit: ' times /s'});
+charts.dbLog = mkCapacityChart('chart-db-log', [
+  {label: ' Log Waits ', borderColor: '#dc2626', yAxisID: 'y'},
+  {label: ' Log Writes ', borderColor: '#0d9488', yAxisID: 'y1'},
+  {label: 'Log Write Requests ', borderColor: '#7c3aed', yAxisID: 'y1', borderDash: [4, 3]},
+], 'Number of waiting times (number of times) /s)', {
+  unit: ' times/s',
+  y1: {title: {display: true, text: 'Writes/s'}},
+});
+
+function push(chart, ts, values) {
+  chart.data.datasets.forEach((d, i) => upsert(d.data, ts, values[i], maxPoints));
+  redraw(chart);
+}
+
+const errorKindLabels = {
+  database_rejected_connection: 'Database rejected the connection',
+  sql_request_failure: ' SQL request failed ',
+  runner_process_failure: 'Load test process failed ',
+  user_cancelled: 'Stopped by user',
+};
+const qualityLabels = {
+  pending: ' Ongoing', valid: 'Valid', partial: 'Partially valid ',
+  not_usable: 'Unusable', unknown: ' Unknown',
+};
+function text(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value == null || value === '' ? '-' : value;
+}
+
+function numberText(value, digits = 0) {
+  return value == null ? '-' : Number(value).toLocaleString(document.documentElement.lang, {
+    minimumFractionDigits: digits, maximumFractionDigits: digits,
+  });
+}
+
+function updateObservability(obs, run) {
+  if (!obs) return;
+  text('quality-label', qualityLabels[obs.quality] || obs.quality);
+  text('quality-reason', sqlPulseUiText(obs.quality_reason));
+  const errorText = obs.error_kind ? ` (${errorKindLabels[obs.error_kind] || obs.error_kind})` : '';
+  document.getElementById('error-kind').textContent = errorText;
+  const banner = document.getElementById('quality-banner');
+  banner.className = 'card advice ' + (obs.quality === 'valid' ? 'advice-info' :
+    (obs.quality === 'pending' ? 'advice-info' : (obs.quality === 'partial' ? 'advice-warn' : 'advice-error')));
+  text('obs-request-count', numberText(obs.request_count));
+  text('obs-request-failures', numberText(obs.request_failures));
+  text('obs-start-failures', numberText(obs.user_start_failures));
+  text('obs-exceptions', numberText(obs.exception_count));
+  const final = obs.final_metrics || {};
+  text('obs-final-qps', numberText(final.qps_avg, 1));
+  text('obs-final-p99', final.p99_ms == null ? '-' : `${numberText(final.p99_ms, 1)} ms`);
+  const capacity = obs.latest_capacity || {};
+  text('obs-threads-connected', numberText(capacity.threads_connected));
+  text('obs-max-connections', numberText(capacity.max_connections));
+  text('obs-active-users', numberText(capacity.active_users));
+  text('obs-connection-usage', capacity.connection_usage_pct == null ? '-' : `${numberText(capacity.connection_usage_pct, 1)}%`);
+  const top = obs.top_exception;
+  const details = top ? ` Most recent exception: ${top.message} (${numberText(top.count)} times) ` : ' No Locust initialization errors detected.';
+  text('obs-detail', details);
+  const state = document.getElementById('collector-state');
+  if (run && !isActive(run)) {
+    state.textContent = ' Test ended ';
+    state.className = 'badge badge-finished';
+  } else {
+    state.textContent = 'Normal';
+    state.className = 'badge badge-running';
+  }
+  if (run && run.process_exit_code != null) {
+    text('error-kind', `${document.getElementById('error-kind').textContent} Process exit code: ${run.process_exit_code}`);
+  }
+}
+
+let latestSqlTs = -Infinity;
+let latestResourceTs = -Infinity;
+function updatePointStatus(point) {
+  if (!point) return;
+  if (point.request_count != null && point.ts >= latestSqlTs) {
+    latestSqlTs = point.ts;
+    text('obs-request-count', numberText(point.request_count));
+    text('obs-request-failures', numberText(point.request_failures));
+  }
+  if (point.metric_scope !== 'sql' && point.ts >= latestResourceTs) {
+    latestResourceTs = point.ts;
+    text('obs-start-failures', numberText(point.user_start_failures));
+    text('obs-exceptions', numberText(point.exception_count));
+    text('obs-threads-connected', numberText(point.threads_connected));
+    text('obs-max-connections', numberText(point.max_connections));
+    text('obs-active-users', numberText(point.active_users));
+    text('obs-connection-usage', point.connection_usage_pct == null ? '-' : `${numberText(point.connection_usage_pct, 1)}%`);
+  }
+  if (terminalRun) return;
+  const state = document.getElementById('collector-state');
+  state.textContent = ' Normal ';
+  state.className = 'badge badge-running';
+}
+
+function onPoint(p) {
+  updatePointStatus(p);
+  if (p.source_ts != null || p.qps != null) {
+    const ts = p.source_ts ?? p.ts;
+    push(charts.qps, ts, [p.qps, p.err_rate]);
+    push(charts.latencyAvg, ts, [p.avg_ms]);
+    push(charts.latencyPercentiles, ts, [p.p95_ms, p.p99_ms]);
+  }
+  if (p.metric_scope === 'sql') return;
+  push(charts.conn, p.ts, [p.threads_running, p.threads_connected]);
+  push(charts.engineQps, p.ts, [p.mysql_qps]);
+  push(charts.engineSlow, p.ts, [p.slow_inc]);
+  push(charts.engineLock, p.ts, [p.lock_waits_inc]);
+  push(charts.engineTmp, p.ts, [p.tmp_disk_inc]);
+  push(charts.capacityCpu, p.ts, [p.cpu_pct]);
+  push(charts.capacityMemory, p.ts, [p.memory_pct]);
+  push(charts.capacityDisk, p.ts, [p.disk_used_pct]);
+  push(charts.capacityNetwork, p.ts, [p.net_recv_mb_s, p.net_sent_mb_s]);
+  push(charts.dbConnections, p.ts, [p.threads_connected, p.max_connections, p.active_users, p.connection_usage_pct]);
+  push(charts.dbLocks, p.ts, [p.lock_waits_inc, p.lock_wait_ms_inc]);
+  push(charts.dbDeadlocks, p.ts, [p.deadlocks_inc]);
+  push(charts.dbLog, p.ts, [p.innodb_log_waits_inc, p.innodb_log_writes_inc, p.innodb_log_write_requests_inc]);
+}
+
+let terminalRun = null;
+const es = new EventSource('/api/runs/' + runId + '/stream');
+es.onmessage = (event) => {
+  if (!terminalRun) onPoint(JSON.parse(event.data));
+};
+es.onerror = () => {
+  if (terminalRun) return;
+  const state = document.getElementById('collector-state');
+  state.textContent = ' Connection disconnected. Browser will reconnect automatically ';
+  state.className = 'badge badge-partial';
+};
+es.addEventListener('end', () => {
+  es.close();
+  syncRun();
+});
+
+/* ----------  Statement P95/P99 (Read it.  locust full-history CSV) ---------- */
+const SQL_COLORS = ['#2563eb', '#d97706', '#059669', '#9333ea', '#dc2626', '#0891b2', '#7c3aed', '#0d9488'];
+let perSqlCache = null;
+let perSqlMetric = 'p99';
+let perSqlSelected = null;
+
+function renderPerSql() {
+  if (!perSqlCache) return;
+  const names = Object.keys(perSqlCache).sort();
+  const select = document.getElementById('persql-select');
+  if (!select) return;
+  if (perSqlSelected !== 'all' && !names.includes(perSqlSelected)) perSqlSelected = names[0] || null;
+  const options = ['<option value="all">All SQL</option>']
+    .concat(names.map(n => `<option value="${n}">${n}</option>`));
+  const optionHtml = options.join('');
+  if (select.dataset.options !== optionHtml) {
+    select.innerHTML = optionHtml;
+    select.dataset.options = optionHtml;
+  }
+  select.value = perSqlSelected || '';
+  const visibleNames = perSqlSelected === 'all' ? names : names.filter(n => n === perSqlSelected);
+  charts.persql.data.datasets = visibleNames.map((n, i) => {
+    const data = [];
+    perSqlCache[n].forEach(p => upsert(data, p.ts, p[perSqlMetric + '_ms'], maxPoints));
+    return {
+      label: n, borderColor: SQL_COLORS[i % SQL_COLORS.length],
+      data,
+      spanGaps: 2.5, pointRadius: 0, borderWidth: 1.5, tension: 0,
+    };
+  });
+  const hint = document.getElementById('persql-hint');
+  if (hint) hint.textContent = perSqlSelected === 'all'
+    ? ` Current Show All ${names.length} bar SQL; toggle to single SQL if the curve is larger.`
+    : `Current Display ${perSqlSelected || '-'}; Switchable “ All SQL” A horizontal comparison is made.`;
+  charts.persql.update('none');
+}
+
+function updateTaskTable() {
+  if (!perSqlCache) return;
+  Object.entries(perSqlCache).forEach(([n, series]) => {
+    ['p95', 'p99'].forEach(k => {
+      const cell = document.getElementById(`ps-${n}-${k}`);
+      if (!cell) return;
+      let last = null;
+      for (let i = series.length - 1; i >= 0; i--) {
+        if (series[i][k + '_ms'] != null) { last = series[i][k + '_ms']; break; }
+      }
+      cell.textContent = last === null ? '-' : last.toFixed(1) + ' ms';
+    });
+  });
+}
+
+async function fetchPerSql() {
+  try {
+    const resp = await fetch('/api/runs/' + runId + '/per-sql-metrics');
+    if (!resp.ok) return false;
+    perSqlCache = await resp.json();
+    renderPerSql();
+    updateTaskTable();
+    return true;
+  } catch (e) { return false; }
+}
+fetchPerSql();
+let perSqlTimer = setInterval(fetchPerSql, 3000);
+
+const eventSeverityLabels = {critical: ' Critical ', warning: ' Warning ', info: ' Restore '};
+function renderEvents(payload) {
+  const events = payload.events || [];
+  const thresholds = payload.thresholds || {};
+  text('event-count', `${events.length} An event `);
+  const thresholdEl = document.getElementById('event-thresholds');
+  thresholdEl.textContent = Object.values(thresholds).map(rule =>
+    `${sqlPulseUiText(rule.title)} ≥ ${numberText(rule.threshold, 1)} ${sqlPulseUiText(rule.unit)}`
+  ).join(' · ') || 'No threshold at present ';
+  const list = document.getElementById('event-timeline');
+  list.replaceChildren();
+  if (!events.length) {
+    const empty = document.createElement('li');
+    empty.className = 'muted';
+    empty.textContent = ' No thresholds exceeded';
+    list.appendChild(empty);
+    return;
+  }
+  events.slice().reverse().forEach(event => {
+    const item = document.createElement('li');
+    item.className = `event-${event.severity || 'info'}`;
+    const time = event.ts ? new Date(event.ts * 1000).toLocaleTimeString(document.documentElement.lang, {hour12: false}) : '-';
+    const value = event.value == null ? '-' : numberText(event.value, 1);
+    item.textContent = `${time} · ${eventSeverityLabels[event.severity] || event.severity} · ${sqlPulseUiText(event.title)}: ${value} ${sqlPulseUiText(event.unit) || ''} (threshold  ${numberText(event.threshold, 1)} ${sqlPulseUiText(event.unit) || ''})`;
+    list.appendChild(item);
+  });
+}
+async function fetchEvents() {
+  try {
+    const resp = await fetch('/api/runs/' + runId + '/events');
+    if (!resp.ok) return false;
+    renderEvents(await resp.json());
+    return true;
+  } catch (e) { return false; }
+}
+fetchEvents();
+let eventTimer = setInterval(fetchEvents, 3000);
+
+document.querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.seg-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  perSqlMetric = b.dataset.metric;
+  renderPerSql();
+}));
+document.getElementById('persql-select').addEventListener('change', (e) => {
+  perSqlSelected = e.target.value;
+  renderPerSql();
+});
+
+/* ----------  Time  /  Status  ---------- */
+let timer = setInterval(updateElapsed, 1000);
+let endedAt = {{ (run.ended_at or '') | tojson }};
+function updateElapsed() {
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  document.getElementById('elapsed').textContent = Math.max(0, Math.round((end - startedAt) / 1000)) + 's';
+}
+updateElapsed();
+
+let finishing = false;
+let finished = false;
+
+function isActive(run) {
+  return run.status === 'pending' || run.status === 'running';
+}
+
+function showTerminalState(run) {
+  terminalRun = run;
+  endedAt = run.ended_at;
+  updateElapsed();
+  clearInterval(timer);
+  clearInterval(perSqlTimer);
+  clearInterval(eventTimer);
+  const badge = document.getElementById('run-status');
+  badge.textContent = run.status;
+  badge.className = 'badge badge-' + run.status;
+  document.getElementById('btn-stop').style.display = 'none';
+  document.getElementById('link-report').style.display = '';
+  updateObservability(run.observability, run);
+  es.close();
+}
+
+async function finishPoll(run) {
+  if (!terminalRun) showTerminalState(run);
+  if (finishing || finished) return;
+  finishing = true;
+  try {
+    const metricsResp = await fetch('/api/runs/' + runId + '/metrics');
+    if (!metricsResp.ok) throw new Error('final metrics request failed');
+    const metrics = await metricsResp.json();
+    Object.values(charts).forEach(chart => chart.data.datasets.forEach(dataset => { dataset.data = []; }));
+    latestSqlTs = latestResourceTs = -Infinity;
+    metrics.points.forEach(onPoint);
+    const refreshed = await Promise.all([fetchPerSql(), fetchEvents()]);
+    if (refreshed.some(ok => !ok)) throw new Error('final series refresh failed');
+    updateObservability(metrics.observability || run.observability, run);
+    finished = true;
+    clearInterval(statusTimer);
+  } catch {
+    text('collector-state', 'Could not load final metrics. Retrying…');
+    document.getElementById('collector-state').className = 'badge badge-partial';
+  } finally {
+    finishing = false;
+  }
+}
+
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  const resp = await fetch('/api/runs/' + runId + '/stop', {method: 'POST'});
+  if (!resp.ok) text('collector-state', ' Stop Failure ');
+});
+
+// Poll for missed SSE events and retry incomplete final chart data.
+let refreshing = false;
+async function refreshRun() {
+  if (terminalRun) {
+    await finishPoll(terminalRun);
+    return;
+  }
+  const resp = await fetch('/api/runs/' + runId);
+  if (!resp.ok) throw new Error('run status request failed');
+  const run = await resp.json();
+  if (!isActive(run)) {
+    await finishPoll(run);
+    return;
+  }
+  updateObservability(run.observability, run);
+  const metrics = await fetch('/api/runs/' + runId + '/metrics');
+  if (metrics.ok) {
+    const snapshot = await metrics.json();
+    if (!terminalRun) snapshot.points.forEach(onPoint);
+  }
+}
+
+async function syncRun() {
+  if (refreshing || finished) return;
+  refreshing = true;
+  try {
+    await refreshRun();
+  } catch {
+    text('collector-state', 'Could not load run status. Retrying…');
+    document.getElementById('collector-state').className = 'badge badge-partial';
+  } finally {
+    refreshing = false;
+  }
+}
+const statusTimer = setInterval(syncRun, 3000);
+syncRun();
+</script>
+{% endblock %}
